@@ -44,7 +44,10 @@ Autonode 的思路是：**稳定优先于快**。AI 分组「粘滞」，只在�
 bash install.sh
 ```
 
-或使用 `dist/ClashAutoNode-1.1.0.pkg`（未签名，右键 → 打开）。
+或从 [Releases](https://github.com/shwenyu/Autonode/releases/latest) 下载
+`Autonode-<version>.pkg`（未签名，首次需右键 → 打开）。
+
+> 安装包不进仓库，只作为 Release 资产提供；仓库里只有源码和构建脚本。
 
 **Windows**
 
