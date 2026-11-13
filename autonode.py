@@ -39,7 +39,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -486,17 +486,17 @@ def write_groups(clash_dir, uid, groups):
 
 
 def list_targets(ctx):
-    """可选的分流目标：DIRECT / REJECT + 所有选择器分组。"""
-    targets = ["DIRECT", "REJECT"]
+    """可选的分流目标：分组在前，DIRECT/REJECT 放最后（避免默认选中直连）。"""
+    groups = []
     try:
         data = api(ctx, "GET", "/proxies", timeout=10).get("proxies", {})
         for name, info in data.items():
-            if info.get("type") in ("Selector", "URLTest", "Fallback"):
-                if name not in targets:
-                    targets.append(name)
+            if info.get("type") in ("Selector", "URLTest", "Fallback") and name.strip().upper() != "GLOBAL":
+                if name not in groups:
+                    groups.append(name)
     except Exception:
         pass
-    return targets
+    return groups + ["DIRECT", "REJECT"]
 
 
 def write_rules(clash_dir, uid, routes):
@@ -1975,11 +1975,29 @@ function loadRoutes(){
       return '<option value="'+q+'">'+t+'</option>';
     }).join('');
     renderRoutes(d);
+    if(!sel.dataset.init){
+      sel.dataset.init = '1';
+      var ai = ((STATUS && STATUS.groups) || []).filter(function(g){ return (g.config.role||'') === 'ai'; })[0];
+      var prefer = ai && ai.config.group;
+      sel.value = (prefer && RT_TARGETS.indexOf(prefer) >= 0) ? prefer : (RT_TARGETS[0] || '');
+    }
   });
 }
+
+document.addEventListener('change', function(e){
+  var s = e.target;
+  if(!s || !s.matches || !s.matches('select[data-rtt]')) return;
+  var i = parseInt(s.dataset.rtt, 10);
+  if(ROUTES[i]){ ROUTES[i].target = s.value; saveRoutes(); }
+});
 function renderRoutes(d){
   el('rt').innerHTML = (ROUTES||[]).map(function(r,i){
-    return '<tr><td>'+r.type+'</td><td class="mono">'+r.value+'</td><td>'+r.target+'</td>'
+    var opts = RT_TARGETS.map(function(t){
+      var q = String(t).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+      return '<option value="'+q+'"'+(t === r.target ? ' selected' : '')+'>'+t+'</option>';
+    }).join('');
+    return '<tr><td>'+r.type+'</td><td class="mono">'+r.value+'</td>'
+      + '<td><select data-rtt="'+i+'" style="width:100%">'+opts+'</select></td>'
       + '<td><button data-rtdel="'+i+'">删</button></td></tr>';
   }).join('') || '<tr><td colspan="4" class="muted">还没有规则</td></tr>';
   if(d && d.rules_uid === null) el('rt-msg').textContent = '提示：当前订阅没有「规则」模板，应用会失败。';
@@ -1997,7 +2015,11 @@ document.addEventListener('click', function(e){
   if(b){ ROUTES.splice(parseInt(b.dataset.rtdel,10),1); saveRoutes(); }
 });
 el('rt-ai').onclick = function(){
-  var target = el('rt-target').value || 'DIRECT';
+  var target = el('rt-target').value || '';
+  if(!target || target === 'DIRECT' || target === 'REJECT'){
+    el('rt-msg').textContent = '先在「走向」里选一个分组（AI 规则不能导入到直连）';
+    return;
+  }
   get('/api/presets/ai').then(function(d){
     var have = {}; ROUTES.forEach(function(r){ have[r.type+'|'+r.value+'|'+r.target] = 1; });
     var added = 0;
