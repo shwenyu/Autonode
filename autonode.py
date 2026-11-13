@@ -37,7 +37,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.1.2"
+VERSION = "1.1.3"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -1631,13 +1631,28 @@ document.addEventListener('click', function(e){
 });
 
 /* ---------------- 刷新 ---------------- */
+var failCount = 0, retryTimer = null;
+
+function setState(text, cls){
+  var e = el('state');
+  if(!e) return;
+  e.textContent = text;
+  e.className = 'badge ' + (cls || '');
+}
+
 function refresh(){
-  get('/api/status').then(function(s){
+  var ctrl = window.AbortController ? new AbortController() : null;
+  var timer = setTimeout(function(){ if(ctrl) ctrl.abort(); }, 4000);
+  fetch('/api/status',{cache:'no-store', signal: ctrl ? ctrl.signal : undefined})
+   .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
+   .then(function(s){
+    clearTimeout(timer);
+    failCount = 0;
     STATUS = s;
     CTL = s.controller || {};
     el('ctl').textContent = CTL.kind==='unix' ? 'Clash Verge (unix socket)'
       : (CTL.kind==='tcp' ? ('控制器 '+CTL.target) : '未检测到客户端');
-    el('state').textContent = '运行中'; el('state').className='badge ok';
+    setState('运行中', 'ok');
     if(el('ver')) el('ver').textContent = 'v' + (s.version || '');
     el('sub-import').textContent = (CTL.kind==='unix')?'在 Verge 中导入':'复制订阅链接';
     var ai = (s.groups||[]).filter(function(g){ return (g.config.role||'') === 'ai'; })[0];
@@ -1647,8 +1662,21 @@ function refresh(){
     updateGroups(s);
     if(NAV==='site') fillSiteGroups(s);
     if(!el('addsel').options.length || el('addsel').options[0].value==='') loadAvailable();
-  }).catch(function(){ el('state').textContent='连接失败'; el('state').className='badge bad'; });
+   })
+   .catch(function(){
+    clearTimeout(timer);
+    failCount++;
+    if(failCount >= 3){ setState('连接失败', 'bad'); }
+    else { setState('连接中…', 'warn'); }
+    if(!retryTimer){
+      retryTimer = setTimeout(function(){ retryTimer = null; refresh(); }, 1200);
+    }
+   });
 }
+
+document.addEventListener('visibilitychange', function(){
+  if(!document.hidden){ failCount = 0; refresh(); }
+});
 
 refresh(); setInterval(refresh, 5000);
 setTimeout(loadAvailable, 800);
