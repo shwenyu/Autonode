@@ -24,12 +24,14 @@ import http.client
 import json
 import os
 import platform
+import plistlib
 import re
 import shutil
 import shlex
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -37,7 +39,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -620,6 +622,50 @@ def vpn_watchdog(engine):
             interval = 60
         time.sleep(interval)
         vpn_tick(engine, cooldown)
+
+
+def build_vpn_mobileconfig(name, kind, server, account, password, secret):
+    """生成 VPN 配置描述文件（.mobileconfig），由系统弹窗确认安装。"""
+    import uuid as _uuid
+    uid = str(_uuid.uuid4()).upper()
+    payload = {
+        "PayloadType": "com.apple.vpn.managed",
+        "PayloadVersion": 1,
+        "PayloadIdentifier": "com.autonode.vpn." + uid,
+        "PayloadUUID": uid,
+        "PayloadDisplayName": name,
+        "UserDefinedName": name,
+        "VPNType": kind,
+    }
+    if kind == "IKEv2":
+        payload["IKEv2"] = {
+            "RemoteAddress": server,
+            "LocalIdentifier": account or server,
+            "RemoteIdentifier": server,
+            "AuthenticationMethod": "None",
+            "ExtendedAuthEnabled": 1,
+        }
+        payload["PPP"] = {"AuthName": account or "", "AuthPassword": password or ""}
+    else:
+        payload["PPP"] = {
+            "AuthName": account or "",
+            "AuthPassword": password or "",
+            "CommRemoteAddress": server,
+        }
+        payload["IPSec"] = {
+            "AuthenticationMethod": "SharedSecret",
+            "SharedSecret": (secret or "").encode("utf-8"),
+        }
+    root = {
+        "PayloadType": "Configuration",
+        "PayloadVersion": 1,
+        "PayloadIdentifier": "com.autonode.profile." + uid,
+        "PayloadUUID": str(_uuid.uuid4()).upper(),
+        "PayloadDisplayName": name,
+        "PayloadOrganization": "Autonode",
+        "PayloadContent": [payload],
+    }
+    return plistlib.dumps(root)
 
 
 def vpn_action(name, action):
@@ -1499,6 +1545,7 @@ details summary{cursor:pointer;font-size:12px;color:var(--dim);margin-top:12px}
     <h2>系统 VPN</h2>
     <div class="muted">管理 macOS 里已配置的 VPN（L2TP / IKEv2 / IPSec / 第三方客户端）。Clash 内核不支持这些协议，所以它们不会出现在节点列表里，只能在这里连接/断开。勾选「保持」后每 60 秒检查一次，断线自动重连。</div>
     <div class="row" style="margin-top:10px">
+      <button id="vpn-new" class="primary">新建 VPN</button>
       <button id="vpn-refresh">刷新</button>
       <a class="muted" href="x-apple.systempreferences:com.apple.Network-Settings.extension">打开系统设置 →</a>
     </div>
@@ -1509,6 +1556,22 @@ details summary{cursor:pointer;font-size:12px;color:var(--dim);margin-top:12px}
     <div class="muted" id="vpn-msg" style="margin-top:8px"></div>
   </div>
 </section>
+
+<div class="modal" id="vpnmodal" hidden>
+  <div class="box">
+    <div class="row" style="justify-content:space-between"><b>新建 VPN（生成配置描述文件）</b><button id="vpn-close" class="ghost">关闭</button></div>
+    <div class="muted">macOS 不允许应用直接写系统 VPN 配置，这里生成 .mobileconfig，由系统弹窗确认安装。安装完成后点「刷新」即可管理。</div>
+    <div class="grid">
+      <div><label>名称</label><input id="vpn-name" placeholder="学校 VPN"></div>
+      <div><label>类型</label><select id="vpn-type"><option value="IKEv2">IKEv2</option><option value="L2TP">L2TP over IPSec</option></select></div>
+      <div><label>服务器</label><input id="vpn-server" placeholder="vpn.example.edu"></div>
+      <div><label>账号</label><input id="vpn-account" placeholder="用户名"></div>
+      <div><label>密码</label><input id="vpn-password" type="password"></div>
+      <div><label>共享密钥（L2TP 需要）</label><input id="vpn-secret" type="password"></div>
+    </div>
+    <div class="row"><button class="primary" id="vpn-create">生成并安装</button><span class="muted" id="vpn-create-msg"></span></div>
+  </div>
+</div>
 
 <div class="modal" id="regionmodal" hidden>
   <div class="box">
@@ -1632,6 +1695,33 @@ function loadVpns(){
 }
 
 if(el('vpn-refresh')) el('vpn-refresh').onclick = loadVpns;
+
+if(el('vpn-new')) el('vpn-new').onclick = function(){
+  el('vpnmodal').hidden = false;
+  el('vpn-create-msg').textContent = '';
+};
+if(el('vpn-close')) el('vpn-close').onclick = function(){ el('vpnmodal').hidden = true; };
+if(el('vpnmodal')) el('vpnmodal').onclick = function(e){
+  if(e.target === el('vpnmodal')) el('vpnmodal').hidden = true;
+};
+if(el('vpn-create')) el('vpn-create').onclick = function(){
+  var body = {
+    name: (el('vpn-name').value || '').trim(),
+    type: el('vpn-type').value,
+    server: (el('vpn-server').value || '').trim(),
+    account: (el('vpn-account').value || '').trim(),
+    password: el('vpn-password').value,
+    secret: el('vpn-secret').value
+  };
+  if(!body.name || !body.server){ el('vpn-create-msg').textContent = '名称和服务器必填'; return; }
+  el('vpn-create-msg').textContent = '生成中…';
+  post('/api/vpn/create', body).then(function(r){
+    el('vpn-create-msg').textContent = r.ok
+      ? '已生成，请在系统弹窗里点「安装」'
+      : ('失败：' + (r.error || ''));
+    if(r.ok) setTimeout(function(){ el('vpnmodal').hidden = true; loadVpns(); }, 2500);
+  });
+};
 
 document.addEventListener('change', function(e){
   var c = e.target;
@@ -2230,6 +2320,26 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/vpn":
             res = vpn_action(str(payload.get("name") or ""), str(payload.get("action") or ""))
             return self._send(200, json.dumps(res, ensure_ascii=False))
+        if path == "/api/vpn/create":
+            name = str(payload.get("name") or "").strip()
+            server = str(payload.get("server") or "").strip()
+            kind = str(payload.get("type") or "IKEv2")
+            if not name or not server:
+                return self._send(400, json.dumps({"ok": False, "error": "需要名称和服务器地址"}, ensure_ascii=False))
+            try:
+                data = build_vpn_mobileconfig(name, kind, server,
+                                              str(payload.get("account") or ""),
+                                              str(payload.get("password") or ""),
+                                              str(payload.get("secret") or ""))
+            except Exception as exc:
+                return self._send(500, json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+            out = os.path.join(tempfile.gettempdir(), "autonode-vpn-%d.mobileconfig" % int(time.time()))
+            with open(out, "wb") as fh:
+                fh.write(data)
+            os.chmod(out, 0o600)
+            subprocess.run(["open", out], capture_output=True)
+            log("[VPN] 已生成配置描述文件：%s（等待系统确认安装）" % out)
+            return self._send(200, json.dumps({"ok": True, "file": out}, ensure_ascii=False))
         if path == "/api/vpn/keep":
             name = str(payload.get("name") or "").strip()
             enabled = bool(payload.get("enabled"))
