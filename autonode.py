@@ -37,7 +37,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.3.1"
+VERSION = "1.4.0"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -52,6 +52,177 @@ REGION_CHOICES = [
     "波兰", "巴西", "阿根廷", "南非", "新西兰", "爱尔兰",
     "奥地利", "比利时", "丹麦", "挪威", "芬兰", "俄罗斯", "印度",
 ]
+
+REGION_UNKNOWN = "未知"
+
+REGION_ALIASES = {
+    "日本": ["日本", "japan", "jp", "jpn", "tokyo", "osaka", "nrt", "hnd", "kix", "东京", "大阪"],
+    "新加坡": ["新加坡", "singapore", "sg", "sgp", "狮城"],
+    "美国": ["美国", "united states", "usa", "us", "america", "lax", "sjc", "seattle", "dallas",
+             "ashburn", "silicon", "洛杉矶", "西雅图", "硅谷", "纽约"],
+    "香港": ["香港", "hong kong", "hongkong", "hk", "hkg"],
+    "台湾": ["台湾", "台灣", "taiwan", "tw", "twn", "taipei", "台北"],
+    "韩国": ["韩国", "韓國", "korea", "kr", "kor", "seoul", "首尔", "仁川"],
+    "德国": ["德国", "germany", "de", "deu", "frankfurt", "fra", "berlin", "法兰克福"],
+    "英国": ["英国", "united kingdom", "uk", "gbr", "london", "lon", "lhr", "伦敦"],
+    "荷兰": ["荷兰", "netherlands", "nl", "nld", "amsterdam", "ams", "阿姆斯特丹"],
+    "法国": ["法国", "france", "fr", "paris", "cdg", "巴黎"],
+    "加拿大": ["加拿大", "canada", "ca", "can", "toronto", "vancouver", "多伦多"],
+    "澳大利亚": ["澳大利亚", "澳洲", "australia", "au", "aus", "sydney", "syd", "悉尼"],
+    "马来西亚": ["马来西亚", "malaysia", "my", "mys", "kuala lumpur", "吉隆坡"],
+    "泰国": ["泰国", "thailand", "th", "tha", "bangkok", "曼谷"],
+    "越南": ["越南", "vietnam", "vn", "vnm", "hanoi", "河内"],
+    "菲律宾": ["菲律宾", "philippines", "ph", "phl", "manila", "马尼拉"],
+    "印度尼西亚": ["印度尼西亚", "印尼", "indonesia", "id", "idn", "jakarta", "雅加达"],
+    "土耳其": ["土耳其", "turkey", "tr", "tur", "istanbul", "伊斯坦布尔"],
+    "迪拜": ["迪拜", "dubai", "ae", "are", "阿联酋"],
+    "瑞士": ["瑞士", "switzerland", "ch", "che", "zurich", "苏黎世"],
+    "西班牙": ["西班牙", "spain", "es", "esp", "madrid", "马德里"],
+    "意大利": ["意大利", "italy", "it", "ita", "milan", "米兰"],
+    "瑞典": ["瑞典", "sweden", "se", "swe", "stockholm", "斯德哥尔摩"],
+    "波兰": ["波兰", "poland", "pl", "pol", "warsaw", "华沙"],
+    "巴西": ["巴西", "brazil", "br", "bra", "sao paulo", "圣保罗"],
+    "阿根廷": ["阿根廷", "argentina", "ar", "arg", "buenos aires"],
+    "南非": ["南非", "south africa", "za", "zaf", "johannesburg"],
+    "新西兰": ["新西兰", "new zealand", "nz", "nzl", "auckland", "奥克兰"],
+    "爱尔兰": ["爱尔兰", "ireland", "ie", "irl", "dublin", "都柏林"],
+    "奥地利": ["奥地利", "austria", "at", "aut", "vienna", "维也纳"],
+    "比利时": ["比利时", "belgium", "be", "bel", "brussels", "布鲁塞尔"],
+    "丹麦": ["丹麦", "denmark", "dk", "dnk", "copenhagen", "哥本哈根"],
+    "挪威": ["挪威", "norway", "no", "nor", "oslo", "奥斯陆"],
+    "芬兰": ["芬兰", "finland", "fi", "fin", "helsinki", "赫尔辛基"],
+    "俄罗斯": ["俄罗斯", "russia", "ru", "rus", "moscow", "莫斯科"],
+    "印度": ["印度", "india", "in", "ind", "mumbai", "孟买"],
+}
+
+REGION_EXTRA = {
+    "中国": ["中国", "china", "cn", "chn", "回国", "上海", "北京", "广州", "深圳"],
+    "乌克兰": ["乌克兰", "ukraine", "ua", "ukr", "kyiv", "kiev"],
+    "以色列": ["以色列", "israel", "il", "isr", "tel aviv"],
+    "保加利亚": ["保加利亚", "bulgaria", "bg", "bgr", "sofia"],
+    "克罗地亚": ["克罗地亚", "croatia", "hr", "hrv", "zagreb"],
+    "哈萨克斯坦": ["哈萨克斯坦", "kazakhstan", "kz", "kaz", "almaty"],
+    "哥斯达黎加": ["哥斯达黎加", "costa rica", "cr", "cri"],
+    "埃及": ["埃及", "egypt", "eg", "egy", "cairo"],
+    "塞尔维亚": ["塞尔维亚", "serbia", "rs", "srb", "belgrade"],
+    "墨西哥": ["墨西哥", "mexico", "mx", "mex"],
+    "尼日利亚": ["尼日利亚", "nigeria", "ng", "nga", "lagos"],
+    "巴基斯坦": ["巴基斯坦", "pakistan", "pk", "pak", "karachi"],
+    "希腊": ["希腊", "greece", "gr", "grc", "athens"],
+    "智利": ["智利", "chile", "cl", "chl", "santiago"],
+    "柬埔寨": ["柬埔寨", "cambodia", "kh", "khm", "phnom penh"],
+    "秘鲁": ["秘鲁", "peru", "pe", "per", "lima"],
+    "立陶宛": ["立陶宛", "lithuania", "lt", "ltu", "vilnius"],
+    "老挝": ["老挝", "laos", "la", "lao", "vientiane"],
+    "阿尔巴尼亚": ["阿尔巴尼亚", "albania", "al", "alb", "tirana"],
+    "马里": ["马里", "mali", "ml", "mli", "bamako"],
+    "匈牙利": ["匈牙利", "hungary", "hu", "hun", "budapest"],
+    "捷克": ["捷克", "czech", "cz", "cze", "prague"],
+    "罗马尼亚": ["罗马尼亚", "romania", "ro", "rou", "bucharest"],
+    "斯洛伐克": ["斯洛伐克", "slovakia", "sk", "svk", "bratislava"],
+    "斯洛文尼亚": ["斯洛文尼亚", "slovenia", "si", "svn", "ljubljana"],
+    "爱沙尼亚": ["爱沙尼亚", "estonia", "ee", "est", "tallinn"],
+    "拉脱维亚": ["拉脱维亚", "latvia", "lv", "lva", "riga"],
+    "卢森堡": ["卢森堡", "luxembourg", "lu", "lux"],
+    "葡萄牙": ["葡萄牙", "portugal", "pt", "prt", "lisbon"],
+    "哥伦比亚": ["哥伦比亚", "colombia", "co", "col", "bogota"],
+    "沙特阿拉伯": ["沙特", "沙特阿拉伯", "saudi", "sa", "sau", "riyadh"],
+    "卡塔尔": ["卡塔尔", "qatar", "qa", "qat", "doha"],
+    "孟加拉": ["孟加拉", "bangladesh", "bd", "bgd", "dhaka"],
+    "斯里兰卡": ["斯里兰卡", "sri lanka", "lk", "lka", "colombo"],
+    "尼泊尔": ["尼泊尔", "nepal", "np", "npl", "kathmandu"],
+    "缅甸": ["缅甸", "myanmar", "mm", "mmr", "yangon"],
+    "澳门": ["澳门", "澳門", "macau", "macao", "mo"],
+    "关岛": ["关岛", "guam", "gu"],
+    "阿曼": ["阿曼", "oman", "om", "omn", "muscat"],
+    "科威特": ["科威特", "kuwait", "kw", "kwt"],
+    "约旦": ["约旦", "jordan", "jo", "jor", "amman"],
+    "黎巴嫩": ["黎巴嫩", "lebanon", "lb", "lbn", "beirut"],
+    "摩洛哥": ["摩洛哥", "morocco", "ma", "mar", "casablanca"],
+    "突尼斯": ["突尼斯", "tunisia", "tn", "tun", "tunis"],
+    "肯尼亚": ["肯尼亚", "kenya", "ke", "ken", "nairobi"],
+    "加纳": ["加纳", "ghana", "gh", "gha", "accra"],
+    "塞舌尔": ["塞舌尔", "seychelles", "sc", "syc"],
+    "毛里求斯": ["毛里求斯", "mauritius", "mu", "mus"],
+    "巴拿马": ["巴拿马", "panama", "pa", "pan"],
+    "乌拉圭": ["乌拉圭", "uruguay", "uy", "ury", "montevideo"],
+    "巴拉圭": ["巴拉圭", "paraguay", "py", "pry", "asuncion"],
+    "玻利维亚": ["玻利维亚", "bolivia", "bo", "bol", "lapaz"],
+    "委内瑞拉": ["委内瑞拉", "venezuela", "ve", "ven", "caracas"],
+    "厄瓜多尔": ["厄瓜多尔", "ecuador", "ec", "ecu", "quito"],
+}
+REGION_ALIASES.update(REGION_EXTRA)
+for _r in REGION_EXTRA:
+    if _r not in REGION_CHOICES:
+        REGION_CHOICES.append(_r)
+
+_REGION_STATE = {"overrides": {}, "servers": {}}
+
+
+def _match_aliases(text):
+    low = (text or "").lower()
+    if not low:
+        return None
+    for region, aliases in REGION_ALIASES.items():
+        for alias in aliases:
+            if alias.isascii() and len(alias) <= 3:
+                if re.search(r"(?<![a-z])%s(?![a-z])" % re.escape(alias), low):
+                    return region
+            elif alias in low:
+                return region
+    return None
+
+
+def detect_region(name):
+    """识别链：人工覆盖 > 节点名 > 服务器主机名 > 未知。"""
+    overrides = _REGION_STATE.get("overrides") or {}
+    if name in overrides:
+        return overrides[name]
+    hit = _match_aliases(name)
+    if hit:
+        return hit
+    server = (_REGION_STATE.get("servers") or {}).get(name)
+    if server:
+        return _match_aliases(server)
+    return None
+
+
+def load_profile_servers(clash_dir):
+    """从当前订阅里解析 节点名 -> 服务器地址，供地区推断兜底。"""
+    if not clash_dir:
+        return {}
+    try:
+        with open(os.path.join(clash_dir, "profiles.yaml"), encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return {}
+    m = re.search(r"^current:\s*(\S+)\s*$", text, re.M)
+    if not m:
+        return {}
+    path = os.path.join(clash_dir, "profiles", "%s.yaml" % m.group(1))
+    try:
+        with open(path, encoding="utf-8") as fh:
+            body = fh.read()
+    except OSError:
+        return {}
+    servers = {}
+    for line in body.splitlines():
+        if "server:" not in line:
+            continue
+        nm = re.search(r"name:\s*(?:'([^']*)'|\"([^\"]*)\"|([^,}]+))", line)
+        sv = re.search(r"server:\s*([^,}\s]+)", line)
+        if nm and sv:
+            name = (nm.group(1) or nm.group(2) or nm.group(3) or "").strip()
+            if name:
+                servers[name] = sv.group(1).strip()
+    return servers
+
+
+def refresh_region_state(cfg, servers=None):
+    _REGION_STATE["overrides"] = dict(cfg.get("region_overrides") or {})
+    if servers is not None:
+        _REGION_STATE["servers"] = dict(servers)
+
 
 COMMON = {
     "enabled": True,
@@ -118,6 +289,7 @@ DEFAULT_CONFIG = {
     "groups": [],
     "custom_groups": [],
     "vpn_keep": [],
+    "region_overrides": {},
     "vpn_interval": 60,
     "routes": [],
 }
@@ -676,9 +848,13 @@ def is_node(name):
 
 
 def region_priority(name, regions):
-    for idx, region in enumerate(regions):
-        if region in name:
-            return idx, region
+    region = detect_region(name)
+    if region is None:
+        if REGION_UNKNOWN in regions:
+            return len(regions), REGION_UNKNOWN
+        return None
+    if region in regions:
+        return regions.index(region), region
     return None
 
 
@@ -1042,6 +1218,7 @@ class Engine(object):
         self.cfg = load_config()
         self.cfg["clash_dir"] = self.cfg.get("clash_dir") or detect_clash_dir()
         self.controller = detect_controller(self.cfg) or {}
+        refresh_region_state(self.cfg, load_profile_servers(self.cfg.get("clash_dir")))
         self.stopped = False
         self.site = {"running": False, "url": "", "results": []}
         if not self.cfg.get("groups"):
@@ -1333,6 +1510,16 @@ details summary{cursor:pointer;font-size:12px;color:var(--dim);margin-top:12px}
   </div>
 </section>
 
+<div class="modal" id="regionmodal" hidden>
+  <div class="box">
+    <div class="row" style="justify-content:space-between"><b>未识别地区的节点</b><button id="rg-close" class="ghost">关闭</button></div>
+    <div class="muted">选中地区后会记住，下次测速按新地区参与排序。</div>
+    <div style="overflow:auto;max-height:55vh"><table><thead><tr><th>节点</th><th style="width:180px">地区</th></tr></thead>
+    <tbody id="rg-body"></tbody></table></div>
+    <div class="muted" id="rg-msg"></div>
+  </div>
+</div>
+
 <div class="modal" id="newgroupmodal" hidden>
   <div class="box">
     <div class="row" style="justify-content:space-between"><b>新建分组</b><button id="ng-close" class="ghost">关闭</button></div>
@@ -1394,6 +1581,36 @@ el('ng-create').onclick = function(){
                                     : ('失败：' + (r.error||''));
   });
 };
+
+function openRegionModal(){
+  el('regionmodal').hidden = false;
+  el('rg-msg').textContent = '加载中…';
+  get('/api/regions/unknown').then(function(d){
+    var regs = d.regions || [];
+    var opts = '<option value="">（未设置）</option>' + regs.map(function(r){
+      return '<option value="' + r + '">' + r + '</option>';
+    }).join('');
+    var rows = (d.nodes || []).map(function(n){
+      var q = String(n).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+      return '<tr><td class="mono">' + n + '</td><td><select data-rg="' + q + '">' + opts + '</select></td></tr>';
+    }).join('');
+    el('rg-body').innerHTML = rows || '<tr><td colspan="2" class="muted">全部节点都已识别出地区</td></tr>';
+    el('rg-msg').textContent = (d.nodes || []).length ? ('共 ' + d.nodes.length + ' 个') : '';
+  }).catch(function(){ el('rg-msg').textContent = '加载失败'; });
+}
+
+if(el('rg-close')) el('rg-close').onclick = function(){ el('regionmodal').hidden = true; };
+if(el('regionmodal')) el('regionmodal').onclick = function(e){
+  if(e.target === el('regionmodal')) el('regionmodal').hidden = true;
+};
+
+document.addEventListener('change', function(e){
+  var sel = e.target;
+  if(!sel || !sel.matches || !sel.matches('select[data-rg]')) return;
+  post('/api/regions/override', {name: sel.dataset.rg, region: sel.value}).then(function(){
+    el('rg-msg').textContent = '已保存：' + sel.dataset.rg + ' → ' + (sel.value || '未设置');
+  });
+});
 
 function loadVpns(){
   get('/api/vpn').then(function(d){
@@ -1518,7 +1735,7 @@ function groupCard(g){
     + '<label>验证候选数</label><input data-field="verify_top" type="number" min="0">'
     + '</div></div>'
     + '<label style="margin-top:12px">地区偏好</label><div class="chips" data-role="regions"></div>'
-    + '<div class="row" style="margin-top:12px"><button class="primary" data-act="save">保存设置</button>'
+    + '<div class="row" style="margin-top:12px"><button class="primary" data-act="save">保存设置</button><button class="ghost" data-act="regions">未识别地区…</button>'
     + '<span class="muted" data-role="save"></span></div></details></div>';
 }
 
@@ -1554,7 +1771,7 @@ function fillGroupForm(card, g){
     };
   }
   var box = card.querySelector('[data-role="regions"]'), cur = c.regions||[];
-  box.innerHTML = (STATUS.region_choices||[]).map(function(r){
+  box.innerHTML = (STATUS.region_choices||[]).concat(['未知']).map(function(r){
     var on = cur.indexOf(r)>=0 ? ' checked' : '';
     return '<label class="chip"><input type="checkbox" value="'+r+'"'+on+'>'+r+'</label>';
   }).join('');
@@ -1609,6 +1826,7 @@ document.addEventListener('click', function(e){
     if(confirm('不再自动管理「'+g.label+'」？')){ post('/api/groups/remove',{id:gid}).then(function(){ refresh(); }); }
   }
   else if(act==='switch'){ post('/api/switch',{id:gid,name:btn.dataset.node}).then(function(){ setTimeout(refresh,600); }); }
+  else if(act==='regions'){ openRegionModal(); }
   else if(act==='save'){
     var regions = Array.from(card.querySelectorAll('[data-role="regions"] input:checked')).map(function(i){return i.value;});
     var patch = {
@@ -1915,6 +2133,24 @@ class Handler(BaseHTTPRequestHandler):
                 out.append({"name": name, "type": info.get("type"),
                             "now": info.get("now"), "managed": name in managed})
             return self._send(200, json.dumps({"ok": True, "groups": out}, ensure_ascii=False))
+        if path == "/api/regions/unknown":
+            ctx = controller_ctx(eng.cfg)
+            try:
+                data = api(ctx, "GET", "/proxies", timeout=10).get("proxies", {})
+            except Exception as exc:
+                return self._send(500, json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+            unknown = []
+            for name, info in data.items():
+                if info.get("type") in ("Selector", "URLTest", "Fallback", "Direct", "Reject", "Compatible"):
+                    continue
+                if not is_node(name):
+                    continue
+                if detect_region(name) is None:
+                    unknown.append(name)
+            return self._send(200, json.dumps({"ok": True, "nodes": unknown,
+                                               "regions": REGION_CHOICES,
+                                               "overrides": eng.cfg.get("region_overrides") or {}},
+                                              ensure_ascii=False))
         if path == "/api/vpn":
             return self._send(200, json.dumps({
                 "ok": True, "vpns": list_system_vpns(), "platform": platform.system(),
@@ -1977,6 +2213,20 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/subscribe/check":
             ok, info = fetch_subscription(str(payload.get("url") or "").strip())
             return self._send(200, json.dumps({"ok": ok, "info": info}, ensure_ascii=False))
+        if path == "/api/regions/override":
+            name = str(payload.get("name") or "").strip()
+            region = str(payload.get("region") or "").strip()
+            if not name:
+                return self._send(400, json.dumps({"ok": False, "error": "缺少节点名"}, ensure_ascii=False))
+            overrides = dict(self.engine.cfg.get("region_overrides") or {})
+            if region:
+                overrides[name] = region
+            else:
+                overrides.pop(name, None)
+            self.engine.cfg["region_overrides"] = overrides
+            save_config(self.engine.cfg)
+            refresh_region_state(self.engine.cfg)
+            return self._send(200, json.dumps({"ok": True, "overrides": overrides}, ensure_ascii=False))
         if path == "/api/vpn":
             res = vpn_action(str(payload.get("name") or ""), str(payload.get("action") or ""))
             return self._send(200, json.dumps(res, ensure_ascii=False))
