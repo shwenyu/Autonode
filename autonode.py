@@ -37,7 +37,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.1.3"
+VERSION = "1.1.4"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -725,6 +725,21 @@ def run_group(engine, g, dry_run=False, runner=None):
         # 此时回退到基础延迟最好的节点，总比守着一个死节点强。
         if current_ms is None and candidates:
             fallback = candidates[0]
+
+            if dry_run:
+                msg = "DRY-RUN 将回退 %s -> %s (%s)" % (
+                    current or "-", fallback["name"], fmt_ms(fallback["ms"]))
+                res.update(action="dry-run", message=msg,
+                           best=fallback["name"], best_ms=fallback["ms"])
+                log("[%s] %s" % (g["label"], msg))
+                return res
+
+            if runner is not None and runner.manual_epoch != epoch:
+                msg = "检测到手动切换，放弃回退"
+                res.update(action="skip", message=msg)
+                log("[%s] %s" % (g["label"], msg))
+                return res
+
             try:
                 api(ctx, "PUT", "/proxies/%s" % urllib.parse.quote(g["group"], safe=""),
                     {"name": fallback["name"]}, timeout=10)

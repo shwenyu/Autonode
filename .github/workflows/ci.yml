@@ -30,5 +30,8 @@ jobs:
           print("import ok, providers:", len(autonode.AI_PROVIDERS))
           PY
 
+      - name: 回归测试（dry-run 不写入 / 手动切换优先）
+        run: python tests/test_dryrun.py
+
       - name: 空环境 dry-run（无控制器时应优雅跳过）
         run: python autonode.py --dry-run
