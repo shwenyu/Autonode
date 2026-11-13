@@ -39,7 +39,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.5.3"
+VERSION = "1.5.4"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -1831,6 +1831,7 @@ function groupCard(g){
     + '<label>防抖偏移(ms)</label><input data-field="keep_offset_ms" type="number" step="10" min="0">'
     + '<label>最少可用节点</label><input data-field="min_healthy" type="number" min="1">'
     + '<label>验证候选数</label><input data-field="verify_top" type="number" min="0">'
+    + '<label>角色</label><select data-field="role"><option value="ai">AI 通道（粘滞，只在失效时换）</option><option value="general">通用（按延迟择优）</option></select>'
     + '</div></div>'
     + '<label style="margin-top:12px">地区偏好</label><div class="chips" data-role="regions"></div>'
     + '<div class="row" style="margin-top:12px"><button class="primary" data-act="save">保存设置</button><button class="ghost" data-act="regions">未识别地区…</button>'
@@ -1838,41 +1839,55 @@ function groupCard(g){
 }
 
 function fillGroupForm(card, g){
-  var c = g.config;
-  var sel = card.querySelector('[data-field="interval_seconds"]');
-  if(!sel.options.length){
-    [60,120,180,300,600,900,1800,3600].forEach(function(v){
-      var o=document.createElement('option'); o.value=v; o.textContent=(v<3600?(v/60)+' 分钟':'1 小时'); sel.appendChild(o);
-    });
+  if(!card) return;
+  var c = (g && g.config) || {};
+  function field(k){ return card.querySelector('[data-field="'+k+'"]'); }
+  function set(k, v){ var e = field(k); if(e) e.value = v; }
+
+  var sel = field('interval_seconds');
+  if(sel){
+    if(!sel.options.length){
+      [60,120,180,300,600,900,1800,3600].forEach(function(v){
+        var o = document.createElement('option');
+        o.value = v; o.textContent = (v < 3600 ? (v/60) + ' 分钟' : '1 小时');
+        sel.appendChild(o);
+      });
+    }
+    set('interval_seconds', String(c.interval_seconds || 300));
   }
-  sel.value = String(c.interval_seconds);
-  ['test_url','verify_url'].forEach(function(k){ card.querySelector('[data-field="'+k+'"]').value = c[k] || ''; });
-  card.querySelector('[data-field="keep_factor"]').value = c.keep_factor;
-  card.querySelector('[data-field="keep_offset_ms"]').value = c.keep_offset_ms;
-  card.querySelector('[data-field="min_healthy"]').value = c.min_healthy;
-  card.querySelector('[data-field="verify_top"]').value = c.verify_top || 0;
-  card.querySelector('[data-field="manual_hold_seconds"]').value = Math.round((c.manual_hold_seconds||1800)/60);
-  card.querySelector('[data-field="role"]').value = c.role || 'general';
-  var psel = card.querySelector('[data-field="verify_provider"]');
+
+  set('test_url', c.test_url || '');
+  set('verify_url', c.verify_url || '');
+  set('keep_factor', c.keep_factor);
+  set('keep_offset_ms', c.keep_offset_ms);
+  set('min_healthy', c.min_healthy);
+  set('verify_top', c.verify_top || 0);
+  set('manual_hold_seconds', Math.round((c.manual_hold_seconds || 1800) / 60));
+  set('role', c.role || 'general');
+
+  var psel = field('verify_provider');
   if(psel){
-    var opts = '<option value="">（不使用验证）</option>';
-    opts += PROVIDERS.map(function(p){
-      return '<option value="'+p.url+'">'+p.name+'</option>';
-    }).join('');
-    opts += '<option value="__custom">自定义…</option>';
+    var opts = '<option value="">（不使用验证）</option>'
+      + PROVIDERS.map(function(p){ return '<option value="'+p.url+'">'+p.name+'</option>'; }).join('')
+      + '<option value="__custom">自定义…</option>';
     psel.innerHTML = opts;
-    var hit = PROVIDERS.filter(function(p){ return p.url === (c.verify_url||''); })[0];
-    psel.value = hit ? hit.url : ((c.verify_url||'') ? '__custom' : '');
+    var hit = PROVIDERS.filter(function(p){ return p.url === (c.verify_url || ''); })[0];
+    psel.value = hit ? hit.url : ((c.verify_url || '') ? '__custom' : '');
     psel.onchange = function(){
-      if(psel.value === '__custom'){ card.querySelector('[data-field="verify_url"]').focus(); return; }
-      card.querySelector('[data-field="verify_url"]').value = psel.value;
+      if(psel.value === '__custom'){ var v = field('verify_url'); if(v) v.focus(); return; }
+      set('verify_url', psel.value);
     };
   }
-  var box = card.querySelector('[data-role="regions"]'), cur = c.regions||[];
-  box.innerHTML = (STATUS.region_choices||[]).concat(['未知']).map(function(r){
-    var on = cur.indexOf(r)>=0 ? ' checked' : '';
-    return '<label class="chip"><input type="checkbox" value="'+r+'"'+on+'>'+r+'</label>';
-  }).join('');
+
+  var box = card.querySelector('[data-role="regions"]');
+  if(box){
+    var cur = c.regions || [];
+    var choices = (window.STATUS && STATUS.region_choices) || [];
+    box.innerHTML = choices.concat(['未知']).map(function(r){
+      var on = cur.indexOf(r) >= 0 ? ' checked' : '';
+      return '<label class="chip"><input type="checkbox" value="'+r+'"'+on+'>'+r+'</label>';
+    }).join('');
+  }
 }
 
 function renderGroups(s){

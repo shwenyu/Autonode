@@ -37,6 +37,7 @@ jobs:
           python tests/test_region.py
           python tests/test_vpn_profile.py
           python tests/test_targets.py
+          python tests/test_page_fields.py
 
       - name: 空环境 dry-run（无控制器时应优雅跳过）
         run: python autonode.py --dry-run
