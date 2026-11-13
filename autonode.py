@@ -39,7 +39,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.5.2"
+VERSION = "1.5.3"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -1983,9 +1983,9 @@ function loadRoutes(){
       return '<option value="'+q+'">'+t+'</option>';
     }).join('');
     renderRoutes(d);
-    if(!sel.dataset.init){
+    if(!sel.dataset.init && STATUS){
       sel.dataset.init = '1';
-      var ai = ((STATUS && STATUS.groups) || []).filter(function(g){ return (g.config.role||'') === 'ai'; })[0];
+      var ai = (STATUS.groups || []).filter(function(g){ return (g.config.role||'') === 'ai'; })[0];
       var prefer = ai && ai.config.group;
       sel.value = (prefer && RT_TARGETS.indexOf(prefer) >= 0) ? prefer : (RT_TARGETS[0] || '');
     }
