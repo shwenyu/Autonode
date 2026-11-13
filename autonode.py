@@ -35,11 +35,12 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import urllib.request
 import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.5.4"
+VERSION = "1.5.5"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -682,6 +683,84 @@ def vpn_action(name, action):
         return {"ok": False, "error": str(exc)}
     ok = r.returncode == 0
     return {"ok": ok, "output": (r.stdout or r.stderr or "").strip()}
+
+
+GITHUB_REPO = "shwenyu/Autonode"
+LATEST_URL = "https://api.github.com/repos/%s/releases/latest" % GITHUB_REPO
+
+
+def _ver_tuple(text):
+    nums = re.findall(r"\d+", str(text or ""))
+    return tuple(int(n) for n in nums[:3])
+
+
+def check_update():
+    req = urllib.request.Request(
+        LATEST_URL,
+        headers={"User-Agent": "Autonode/" + VERSION,
+                 "Accept": "application/vnd.github+json"})
+    try:
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        return {"ok": False, "error": "查询失败：%s" % exc, "current": VERSION}
+    latest = str(data.get("tag_name") or "").lstrip("v")
+    assets = [{"name": a.get("name"), "url": a.get("browser_download_url"),
+               "size": a.get("size")} for a in (data.get("assets") or [])]
+    return {
+        "ok": True,
+        "current": VERSION,
+        "latest": latest,
+        "has_update": _ver_tuple(latest) > _ver_tuple(VERSION),
+        "url": data.get("html_url"),
+        "published": data.get("published_at"),
+        "notes": (data.get("body") or "")[:2000],
+        "assets": assets,
+    }
+
+
+def apply_update(asset_url, asset_name, mode="install"):
+    if not asset_url or not asset_name:
+        return {"ok": False, "error": "缺少下载地址"}
+    dest_dir = os.path.join(os.path.expanduser("~"), "Downloads")
+    os.makedirs(dest_dir, exist_ok=True)
+    dest = os.path.join(dest_dir, os.path.basename(asset_name))
+    try:
+        req = urllib.request.Request(asset_url, headers={"User-Agent": "Autonode/" + VERSION})
+        with urllib.request.urlopen(req, timeout=60) as resp, open(dest, "wb") as fh:
+            shutil.copyfileobj(resp, fh)
+    except Exception as exc:
+        return {"ok": False, "error": "下载失败：%s" % exc}
+
+    if IS_MAC and asset_name.lower().endswith(".pkg"):
+        if mode == "install":
+            script = 'do shell script "installer -pkg %s -target /" with administrator privileges' % dest.replace('"', '\\"')
+            try:
+                subprocess.Popen(["osascript", "-e", script])
+                return {"ok": True, "mode": "install", "file": dest, "message": "已弹出管理员授权，确认后自动安装"}
+            except Exception as exc:
+                return {"ok": False, "error": "拉起安装失败：%s" % exc, "file": dest}
+    subprocess.run(["open", dest], capture_output=True)
+    return {"ok": True, "mode": "download", "file": dest, "message": "已下载并打开，请按提示完成安装"}
+
+
+def tun_state():
+    ctx = controller_ctx(load_config())
+    try:
+        cfg = api(ctx, "GET", "/configs", timeout=10)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    tun = cfg.get("tun") or {}
+    return {
+        "ok": True,
+        "enable": bool(tun.get("enable")),
+        "stack": tun.get("stack") or "",
+        "auto_route": bool(tun.get("auto-route")),
+        "dns_hijack": tun.get("dns-hijack") or [],
+        "mixed_port": cfg.get("mixed-port") or cfg.get("port"),
+        "mode": cfg.get("mode"),
+        "core": cfg.get("version") or "",
+    }
 
 
 def service_label():
@@ -1461,6 +1540,7 @@ details summary{cursor:pointer;font-size:12px;color:var(--dim);margin-top:12px}
 <div class="sub"><span id="state" class="badge">加载中</span> · <span id="ctl" class="muted"></span> · <span id="aistat" class="muted"></span> · <span class="muted" id="ver"></span></div>
   </div>
   <div class="row">
+    <button id="updatebtn" class="ghost">检查更新</button>
     <button id="logbtn" class="ghost">日志</button>
     <button id="restartbtn" class="ghost">重启服务</button>
     <button id="quitbtn" class="ghost">退出</button>
@@ -1489,6 +1569,19 @@ details summary{cursor:pointer;font-size:12px;color:var(--dim);margin-top:12px}
 </section>
 
 <section id="sec-routes" hidden>
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <div><b>TUN 状态</b> <span id="tun-badge" class="badge">-</span></div>
+      <button id="tun-refresh" class="ghost">刷新</button>
+    </div>
+    <div class="muted" id="tun-info" style="margin-top:8px">-</div>
+    <div class="row" style="margin-top:10px">
+      <input id="tun-proc" placeholder="进程名，例如 codex" style="width:220px">
+      <button id="tun-add">生成进程规则</button>
+      <span class="muted" id="tun-msg"></span>
+    </div>
+    <div class="muted" style="margin-top:8px">TUN 关闭时进程规则不生效。开启 TUN 后，只有该进程的连接走所选分组。</div>
+  </div>
   <div class="card">
     <h2>分流规则（全局）</h2>
     <div class="muted" style="margin-bottom:8px">让指定网站走直连或某个分组。保存后点「应用」会重启内核（仅 Clash Verge 支持）。</div>
@@ -1557,6 +1650,14 @@ details summary{cursor:pointer;font-size:12px;color:var(--dim);margin-top:12px}
   </div>
 </section>
 
+<div class="modal" id="updatemodal" hidden>
+  <div class="box">
+    <div class="row" style="justify-content:space-between"><b>检查更新</b><button id="up-close" class="ghost">关闭</button></div>
+    <div id="up-body" class="muted" style="max-height:45vh;overflow:auto">查询中…</div>
+    <div class="row"><button class="primary" id="up-apply" hidden>下载并安装</button><span class="muted" id="up-msg"></span></div>
+  </div>
+</div>
+
 <div class="modal" id="vpnmodal" hidden>
   <div class="box">
     <div class="row" style="justify-content:space-between"><b>新建 VPN（生成配置描述文件）</b><button id="vpn-close" class="ghost">关闭</button></div>
@@ -1623,7 +1724,13 @@ document.querySelectorAll('[data-nav]').forEach(function(b){
     NAV = b.dataset.nav;
     document.querySelectorAll('[data-nav]').forEach(function(x){ x.classList.toggle('on', x===b); });
     ['groups','routes','sub','site','vpn'].forEach(function(n){ el('sec-'+n).hidden = (n!==NAV); });
-    if(NAV==='routes') el('newgroupbtn').onclick = function(){
+    if(NAV==='routes'){ loadRoutes(); loadTun(); }
+    if(NAV==='site' && STATUS) fillSiteGroups(STATUS);
+    if(NAV==='vpn') loadVpns();
+  };
+});
+
+el('newgroupbtn').onclick = function(){
   el('newgroupmodal').hidden = false;
   el('ng-msg').textContent = '';
   get('/api/proxies').then(function(d){
@@ -1682,6 +1789,69 @@ document.addEventListener('change', function(e){
     el('rg-msg').textContent = '已保存：' + sel.dataset.rg + ' → ' + (sel.value || '未设置');
   });
 });
+
+function loadTun(){
+  get('/api/tun').then(function(d){
+    var b = el('tun-badge');
+    if(!b) return;
+    if(!d.ok){ b.textContent = '读取失败'; b.className = 'badge bad'; el('tun-info').textContent = d.error || ''; return; }
+    b.textContent = d.enable ? '已开启' : '已关闭';
+    b.className = 'badge ' + (d.enable ? 'ok' : 'warn');
+    el('tun-info').textContent = '栈 ' + (d.stack||'-') + ' · 模式 ' + (d.mode||'-')
+      + ' · 混合端口 ' + (d.mixed_port||'-') + ' · DNS 劫持 ' + ((d.dns_hijack||[]).join(',')||'-');
+  }).catch(function(){});
+}
+
+if(el('tun-refresh')) el('tun-refresh').onclick = loadTun;
+if(el('tun-add')) el('tun-add').onclick = function(){
+  var proc = (el('tun-proc').value || '').trim();
+  if(!proc){ el('tun-msg').textContent = '先填进程名'; return; }
+  var target = (el('rt-target') && el('rt-target').value) || '';
+  if(!target || target === 'DIRECT' || target === 'REJECT'){
+    el('tun-msg').textContent = '先在下方「走向」里选一个分组';
+    return;
+  }
+  ROUTES.push({type: 'PROCESS-NAME', value: proc, target: target});
+  saveRoutes().then(function(){
+    el('tun-msg').textContent = '已添加 PROCESS-NAME,' + proc + ' → ' + target;
+  });
+};
+
+function openUpdate(){
+  el('updatemodal').hidden = false;
+  el('up-body').textContent = '查询中…';
+  el('up-apply').hidden = true;
+  el('up-msg').textContent = '';
+  get('/api/update/check').then(function(d){
+    if(!d.ok){ el('up-body').textContent = d.error || '查询失败'; return; }
+    if(!d.has_update){
+      el('up-body').innerHTML = '已是最新版本 <b>v' + d.current + '</b>';
+      return;
+    }
+    el('up-body').innerHTML = '当前 <b>v' + d.current + '</b> → 最新 <b>v' + d.latest + '</b>'
+      + '<br><br>' + String(d.notes || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\n/g, '<br>');
+    var assets = d.assets || [];
+    var pick = assets.filter(function(a){ return /\.pkg$/i.test(a.name || ''); })[0]
+            || assets.filter(function(a){ return /\.zip$/i.test(a.name || ''); })[0];
+    if(pick){ window.__upAsset = pick; el('up-apply').hidden = false; }
+    else { el('up-msg').textContent = '这个 Release 没有可安装的附件'; }
+  }).catch(function(){ el('up-body').textContent = '查询失败'; });
+}
+
+if(el('updatebtn')) el('updatebtn').onclick = openUpdate;
+if(el('up-close')) el('up-close').onclick = function(){ el('updatemodal').hidden = true; };
+if(el('updatemodal')) el('updatemodal').onclick = function(e){
+  if(e.target === el('updatemodal')) el('updatemodal').hidden = true;
+};
+if(el('up-apply')) el('up-apply').onclick = function(){
+  var a = window.__upAsset; if(!a) return;
+  el('up-msg').textContent = '下载中…';
+  el('up-apply').disabled = true;
+  post('/api/update/apply', {url: a.url, name: a.name, mode: 'install'}).then(function(r){
+    el('up-msg').textContent = r.message || r.error || '';
+    if(!r.ok) el('up-apply').disabled = false;
+  });
+};
 
 function loadVpns(){
   get('/api/vpn').then(function(d){
@@ -1753,10 +1923,6 @@ document.addEventListener('click', function(e){
 
 loadProviders();
 loadRoutes();
-    if(NAV==='site' && STATUS) fillSiteGroups(STATUS);
-    if(NAV==='vpn') loadVpns();
-  };
-});
 
 var logTimer = null;
 
@@ -2291,6 +2457,15 @@ class Handler(BaseHTTPRequestHandler):
                                                "regions": REGION_CHOICES,
                                                "overrides": eng.cfg.get("region_overrides") or {}},
                                               ensure_ascii=False))
+        if path == "/api/update/check":
+            return self._send(200, json.dumps(check_update(), ensure_ascii=False))
+        if path == "/api/tun":
+            return self._send(200, json.dumps(tun_state(), ensure_ascii=False))
+        if path == "/api/update/apply":
+            res = apply_update(str(payload.get("url") or ""),
+                               str(payload.get("name") or ""),
+                               str(payload.get("mode") or "install"))
+            return self._send(200, json.dumps(res, ensure_ascii=False))
         if path == "/api/vpn":
             return self._send(200, json.dumps({
                 "ok": True, "vpns": list_system_vpns(), "platform": platform.system(),
