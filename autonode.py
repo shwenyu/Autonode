@@ -37,7 +37,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -117,6 +117,8 @@ DEFAULT_CONFIG = {
     "port": 8765,
     "groups": [],
     "custom_groups": [],
+    "vpn_keep": [],
+    "vpn_interval": 60,
     "routes": [],
 }
 
@@ -405,6 +407,47 @@ def list_system_vpns():
             vpns.append({"status": m.group(1), "id": m.group(2), "type": m.group(3),
                          "name": m.group(4), "proto": m.group(5)})
     return vpns
+
+
+def vpn_tick(engine, cooldown=None):
+    """检查一轮需要保持的 VPN，返回本轮尝试重连的名称列表。"""
+    cooldown = cooldown if cooldown is not None else {}
+    names = list(engine.cfg.get("vpn_keep") or [])
+    if not names:
+        return []
+    try:
+        current = {v["name"]: v["status"] for v in list_system_vpns()}
+    except Exception:
+        return []
+    now = time.time()
+    acted = []
+    for name in names:
+        status = current.get(name)
+        if status is None or status == "Connected":
+            cooldown.pop(name, None)
+            continue
+        if now - cooldown.get(name, 0) < 120:
+            continue
+        cooldown[name] = now
+        res = vpn_action(name, "connect")
+        detail = "成功" if res.get("ok") else ("失败：" + str(res.get("error") or res.get("output")))
+        log("[VPN] %s 当前 %s，自动重连%s" % (name, status, detail))
+        acted.append(name)
+    return acted
+
+
+def vpn_watchdog(engine):
+    """定时检查「保持连接」的系统 VPN，断线自动重连。"""
+    if not IS_MAC:
+        return
+    cooldown = {}
+    while True:
+        try:
+            interval = max(15, int(engine.cfg.get("vpn_interval", 60)))
+        except Exception:
+            interval = 60
+        time.sleep(interval)
+        vpn_tick(engine, cooldown)
 
 
 def vpn_action(name, action):
@@ -1277,13 +1320,13 @@ details summary{cursor:pointer;font-size:12px;color:var(--dim);margin-top:12px}
 <section id="sec-vpn" hidden>
   <div class="card">
     <h2>系统 VPN</h2>
-    <div class="muted">管理 macOS 里已配置的 VPN（L2TP / IKEv2 / IPSec / 第三方客户端）。Clash 内核不支持这些协议，所以它们不会出现在节点列表里，只能在这里连接/断开。</div>
+    <div class="muted">管理 macOS 里已配置的 VPN（L2TP / IKEv2 / IPSec / 第三方客户端）。Clash 内核不支持这些协议，所以它们不会出现在节点列表里，只能在这里连接/断开。勾选「保持」后每 60 秒检查一次，断线自动重连。</div>
     <div class="row" style="margin-top:10px">
       <button id="vpn-refresh">刷新</button>
       <a class="muted" href="x-apple.systempreferences:com.apple.Network-Settings.extension">打开系统设置 →</a>
     </div>
     <table style="margin-top:10px">
-      <thead><tr><th>名称</th><th>类型</th><th>状态</th><th style="width:100px"></th></tr></thead>
+      <thead><tr><th>名称</th><th>类型</th><th>状态</th><th style="width:80px">保持</th><th style="width:100px"></th></tr></thead>
       <tbody id="vpn-body"></tbody>
     </table>
     <div class="muted" id="vpn-msg" style="margin-top:8px"></div>
@@ -1357,19 +1400,29 @@ function loadVpns(){
     var rows = (d.vpns||[]).map(function(v){
       var q = String(v.name).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
       var on = (v.status === 'Connected');
-      return '<tr><td>'+v.name+'</td><td>'+v.proto+'</td><td>'+v.status+'</td><td>'
+      var on2 = (d.keep||[]).indexOf(v.name) >= 0;
+      return '<tr><td>'+v.name+'</td><td>'+v.proto+'</td><td>'+v.status+'</td>'
+        + '<td><input type="checkbox" data-keep="'+q+'"'+(on2?' checked':'')+'></td><td>'
         + (on ? '<button data-vpn="disconnect" data-name="'+q+'">断开</button>'
               : '<button data-vpn="connect" data-name="'+q+'">连接</button>')
         + '</td></tr>';
     }).join('');
     var tb = el('vpn-body');
-    if(tb) tb.innerHTML = rows || '<tr><td colspan="4" class="muted">系统里没有找到 VPN 配置（可在系统设置里添加）</td></tr>';
+    if(tb) tb.innerHTML = rows || '<tr><td colspan="5" class="muted">系统里没有找到 VPN 配置（可在系统设置里添加）</td></tr>';
     var msg = el('vpn-msg');
     if(msg) msg.textContent = (d.platform && d.platform !== 'Darwin') ? ('当前平台 ' + d.platform + ' 暂不支持') : '';
   }).catch(function(){});
 }
 
 if(el('vpn-refresh')) el('vpn-refresh').onclick = loadVpns;
+
+document.addEventListener('change', function(e){
+  var c = e.target;
+  if(!c || !c.matches || !c.matches('input[data-keep]')) return;
+  post('/api/vpn/keep',{name:c.dataset.keep, enabled:c.checked}).then(function(){
+    loadVpns();
+  });
+});
 
 document.addEventListener('click', function(e){
   var t = e.target;
@@ -1863,8 +1916,10 @@ class Handler(BaseHTTPRequestHandler):
                             "now": info.get("now"), "managed": name in managed})
             return self._send(200, json.dumps({"ok": True, "groups": out}, ensure_ascii=False))
         if path == "/api/vpn":
-            return self._send(200, json.dumps({"ok": True, "vpns": list_system_vpns(),
-                                               "platform": platform.system()}, ensure_ascii=False))
+            return self._send(200, json.dumps({
+                "ok": True, "vpns": list_system_vpns(), "platform": platform.system(),
+                "keep": eng.cfg.get("vpn_keep") or [],
+                "interval": eng.cfg.get("vpn_interval", 60)}, ensure_ascii=False))
         if path == "/api/presets/ai-providers":
             return self._send(200, json.dumps(
                 {"ok": True, "providers": [{"id": i, "name": n, "url": u} for i, n, u in AI_PROVIDERS]},
@@ -1925,6 +1980,16 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/vpn":
             res = vpn_action(str(payload.get("name") or ""), str(payload.get("action") or ""))
             return self._send(200, json.dumps(res, ensure_ascii=False))
+        if path == "/api/vpn/keep":
+            name = str(payload.get("name") or "").strip()
+            enabled = bool(payload.get("enabled"))
+            keep = [n for n in (self.engine.cfg.get("vpn_keep") or []) if n != name]
+            if enabled and name:
+                keep.append(name)
+            self.engine.cfg["vpn_keep"] = keep
+            save_config(self.engine.cfg)
+            log("[VPN] %s 保持连接：%s" % (name, "开" if enabled else "关"))
+            return self._send(200, json.dumps({"ok": True, "keep": keep}, ensure_ascii=False))
         if path == "/api/groups/create":
             name = str(payload.get("name") or "").strip()
             members = [str(m) for m in (payload.get("members") or []) if str(m).strip()]
@@ -2038,6 +2103,7 @@ def main(argv):
         log("控制台已启动：http://127.0.0.1:%d（分组：%s）"
             % (port, "、".join(g["label"] for g in engine.cfg["groups"])))
         engine.start()
+        threading.Thread(target=vpn_watchdog, args=(engine,), daemon=True).start()
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
