@@ -37,7 +37,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -387,6 +387,40 @@ def windows_self_install():
     except Exception:
         pass
     return True
+
+
+def list_system_vpns():
+    """列出 macOS 系统 VPN（L2TP / IKEv2 / IPSec / 第三方 tunnel）。"""
+    if not IS_MAC:
+        return []
+    try:
+        out = subprocess.run(["scutil", "--nc", "list"], capture_output=True,
+                             text=True, timeout=10).stdout
+    except Exception:
+        return []
+    vpns = []
+    for line in out.splitlines():
+        m = re.match(r'^\*?\s*\(([^)]+)\)\s+(\S+)\s+(\S+)\s+"([^"]+)"\s+\[([^\]]+)\]', line.strip())
+        if m:
+            vpns.append({"status": m.group(1), "id": m.group(2), "type": m.group(3),
+                         "name": m.group(4), "proto": m.group(5)})
+    return vpns
+
+
+def vpn_action(name, action):
+    if not IS_MAC:
+        return {"ok": False, "error": "系统 VPN 托管目前只支持 macOS"}
+    if action not in ("connect", "disconnect"):
+        return {"ok": False, "error": "unknown action"}
+    if not name:
+        return {"ok": False, "error": "缺少 VPN 名称"}
+    cmd = ["scutil", "--nc", "start" if action == "connect" else "stop", name]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    ok = r.returncode == 0
+    return {"ok": ok, "output": (r.stdout or r.stderr or "").strip()}
 
 
 def service_label():
@@ -1172,6 +1206,7 @@ details summary{cursor:pointer;font-size:12px;color:var(--dim);margin-top:12px}
   <button data-nav="routes">分流规则</button>
   <button data-nav="sub">订阅</button>
   <button data-nav="site">站点诊断</button>
+  <button data-nav="vpn">VPN</button>
 </div>
 
 <section id="sec-groups">
@@ -1239,6 +1274,22 @@ details summary{cursor:pointer;font-size:12px;color:var(--dim);margin-top:12px}
   </div>
 </section>
 
+<section id="sec-vpn" hidden>
+  <div class="card">
+    <h2>系统 VPN</h2>
+    <div class="muted">管理 macOS 里已配置的 VPN（L2TP / IKEv2 / IPSec / 第三方客户端）。Clash 内核不支持这些协议，所以它们不会出现在节点列表里，只能在这里连接/断开。</div>
+    <div class="row" style="margin-top:10px">
+      <button id="vpn-refresh">刷新</button>
+      <a class="muted" href="x-apple.systempreferences:com.apple.Network-Settings.extension">打开系统设置 →</a>
+    </div>
+    <table style="margin-top:10px">
+      <thead><tr><th>名称</th><th>类型</th><th>状态</th><th style="width:100px"></th></tr></thead>
+      <tbody id="vpn-body"></tbody>
+    </table>
+    <div class="muted" id="vpn-msg" style="margin-top:8px"></div>
+  </div>
+</section>
+
 <div class="modal" id="newgroupmodal" hidden>
   <div class="box">
     <div class="row" style="justify-content:space-between"><b>新建分组</b><button id="ng-close" class="ghost">关闭</button></div>
@@ -1277,7 +1328,7 @@ document.querySelectorAll('[data-nav]').forEach(function(b){
   b.onclick = function(){
     NAV = b.dataset.nav;
     document.querySelectorAll('[data-nav]').forEach(function(x){ x.classList.toggle('on', x===b); });
-    ['groups','routes','sub','site'].forEach(function(n){ el('sec-'+n).hidden = (n!==NAV); });
+    ['groups','routes','sub','site','vpn'].forEach(function(n){ el('sec-'+n).hidden = (n!==NAV); });
     if(NAV==='routes') el('newgroupbtn').onclick = function(){
   el('newgroupmodal').hidden = false;
   el('ng-msg').textContent = '';
@@ -1301,9 +1352,41 @@ el('ng-create').onclick = function(){
   });
 };
 
+function loadVpns(){
+  get('/api/vpn').then(function(d){
+    var rows = (d.vpns||[]).map(function(v){
+      var q = String(v.name).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+      var on = (v.status === 'Connected');
+      return '<tr><td>'+v.name+'</td><td>'+v.proto+'</td><td>'+v.status+'</td><td>'
+        + (on ? '<button data-vpn="disconnect" data-name="'+q+'">断开</button>'
+              : '<button data-vpn="connect" data-name="'+q+'">连接</button>')
+        + '</td></tr>';
+    }).join('');
+    var tb = el('vpn-body');
+    if(tb) tb.innerHTML = rows || '<tr><td colspan="4" class="muted">系统里没有找到 VPN 配置（可在系统设置里添加）</td></tr>';
+    var msg = el('vpn-msg');
+    if(msg) msg.textContent = (d.platform && d.platform !== 'Darwin') ? ('当前平台 ' + d.platform + ' 暂不支持') : '';
+  }).catch(function(){});
+}
+
+if(el('vpn-refresh')) el('vpn-refresh').onclick = loadVpns;
+
+document.addEventListener('click', function(e){
+  var t = e.target;
+  if(!t || !t.closest) return;
+  var b = t.closest('button[data-vpn]');
+  if(!b) return;
+  b.disabled = true;
+  post('/api/vpn',{name:b.dataset.name, action:b.dataset.vpn}).then(function(r){
+    if(!r.ok) alert('操作失败：' + (r.error || r.output || ''));
+    setTimeout(loadVpns, 1500);
+  });
+});
+
 loadProviders();
 loadRoutes();
     if(NAV==='site' && STATUS) fillSiteGroups(STATUS);
+    if(NAV==='vpn') loadVpns();
   };
 });
 
@@ -1779,6 +1862,9 @@ class Handler(BaseHTTPRequestHandler):
                 out.append({"name": name, "type": info.get("type"),
                             "now": info.get("now"), "managed": name in managed})
             return self._send(200, json.dumps({"ok": True, "groups": out}, ensure_ascii=False))
+        if path == "/api/vpn":
+            return self._send(200, json.dumps({"ok": True, "vpns": list_system_vpns(),
+                                               "platform": platform.system()}, ensure_ascii=False))
         if path == "/api/presets/ai-providers":
             return self._send(200, json.dumps(
                 {"ok": True, "providers": [{"id": i, "name": n, "url": u} for i, n, u in AI_PROVIDERS]},
@@ -1836,6 +1922,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/subscribe/check":
             ok, info = fetch_subscription(str(payload.get("url") or "").strip())
             return self._send(200, json.dumps({"ok": ok, "info": info}, ensure_ascii=False))
+        if path == "/api/vpn":
+            res = vpn_action(str(payload.get("name") or ""), str(payload.get("action") or ""))
+            return self._send(200, json.dumps(res, ensure_ascii=False))
         if path == "/api/groups/create":
             name = str(payload.get("name") or "").strip()
             members = [str(m) for m in (payload.get("members") or []) if str(m).strip()]
