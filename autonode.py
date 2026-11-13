@@ -39,7 +39,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -1579,6 +1579,7 @@ details summary{cursor:pointer;font-size:12px;color:var(--dim);margin-top:12px}
     <div class="muted">选中地区后会记住，下次测速按新地区参与排序。</div>
     <div style="overflow:auto;max-height:55vh"><table><thead><tr><th>节点</th><th style="width:180px">地区</th></tr></thead>
     <tbody id="rg-body"></tbody></table></div>
+    <div class="muted" id="rg-excluded" style="max-height:130px;overflow:auto"></div>
     <div class="muted" id="rg-msg"></div>
   </div>
 </div>
@@ -1658,7 +1659,14 @@ function openRegionModal(){
       return '<tr><td class="mono">' + n + '</td><td><select data-rg="' + q + '">' + opts + '</select></td></tr>';
     }).join('');
     el('rg-body').innerHTML = rows || '<tr><td colspan="2" class="muted">全部节点都已识别出地区</td></tr>';
-    el('rg-msg').textContent = (d.nodes || []).length ? ('共 ' + d.nodes.length + ' 个') : '';
+    el('rg-msg').textContent = (d.nodes || []).length
+      ? ('共 ' + d.nodes.length + ' 个未识别')
+      : '所有真实节点都已识别出地区';
+    var ex = d.excluded || [];
+    el('rg-excluded').innerHTML = ex.length
+      ? ('<div style="margin-top:10px">已排除的非节点条目（不参与测速）：</div>'
+         + ex.map(function(x){ return '<div class="mono" style="font-size:12px">· ' + x.name + '</div>'; }).join(''))
+      : '';
   }).catch(function(){ el('rg-msg').textContent = '加载失败'; });
 }
 
@@ -2252,14 +2260,19 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 return self._send(500, json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
             unknown = []
+            excluded = []
             for name, info in data.items():
-                if info.get("type") in ("Selector", "URLTest", "Fallback", "Direct", "Reject", "Compatible"):
+                ptype = info.get("type")
+                if ptype in ("Selector", "URLTest", "Fallback", "Direct", "Reject", "Compatible",
+                             "Pass", "PassRule", "RejectDrop"):
                     continue
                 if not is_node(name):
+                    excluded.append({"name": name, "type": ptype})
                     continue
                 if detect_region(name) is None:
                     unknown.append(name)
             return self._send(200, json.dumps({"ok": True, "nodes": unknown,
+                                               "excluded": excluded,
                                                "regions": REGION_CHOICES,
                                                "overrides": eng.cfg.get("region_overrides") or {}},
                                               ensure_ascii=False))
