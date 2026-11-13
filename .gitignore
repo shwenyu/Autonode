@@ -5,3 +5,6 @@ build/
 dist/
 *.log
 config.json
+.build/
+*.pkg
+autonode-windows.zip
