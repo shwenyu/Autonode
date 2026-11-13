@@ -21,6 +21,15 @@ jobs:
           /usr/bin/sed -i '' -E "s/^VERSION = .*/VERSION = \"${VERSION}\"/" autonode.py
           grep -n '^VERSION = ' autonode.py
 
+      - name: Build app bundle
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          bash packaging/macos/build-app.sh build/root/Applications/Autonode.app
+          plutil -replace CFBundleShortVersionString -string "$VERSION" \
+            build/root/Applications/Autonode.app/Contents/Info.plist
+          ls -R build/root/Applications | head
+
       - name: Build pkg
         run: |
           set -euo pipefail
