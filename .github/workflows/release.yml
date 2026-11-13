@@ -1,0 +1,71 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: macOS pkg
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build pkg
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p build/root/usr/local/share/autonode build/scripts
+          cp autonode.py build/root/usr/local/share/autonode/
+          cp packaging/macos/postinstall build/scripts/postinstall
+          chmod +x build/scripts/postinstall
+          find build/root -name "._*" -delete || true
+          pkgbuild \
+            --root build/root \
+            --scripts build/scripts \
+            --identifier com.autonode \
+            --version "$VERSION" \
+            --install-location / \
+            "Autonode-${VERSION}.pkg"
+          ls -lh "Autonode-${VERSION}.pkg"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Autonode-*.pkg
+          fail_on_unmatched_files: true
+
+  windows:
+    name: Windows bundle
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build exe
+        run: |
+          python -m pip install --upgrade pyinstaller
+          python -m PyInstaller --noconfirm --onefile --noconsole --name Autonode autonode.py
+          dir dist
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          $v = $env:GITHUB_REF_NAME.TrimStart('v')
+          New-Item -ItemType Directory -Force -Path pkg | Out-Null
+          Copy-Item autonode.py, windows/install.cmd, windows/uninstall.ps1, windows/build-exe.ps1, windows/README.md, dist/Autonode.exe -Destination pkg
+          Compress-Archive -Path pkg/* -DestinationPath "autonode-windows-$v.zip"
+          Get-ChildItem *.zip | Format-Table Name,Length
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: autonode-windows-*.zip
+          fail_on_unmatched_files: true

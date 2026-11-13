@@ -87,6 +87,23 @@ Autonode 不实现代理，只通过 mihomo 的 **external-controller** 读取�
 
 **ClashX / Stash 连不上** → 在客户端里打开 `external-controller`，把端口和 secret 填进 `config.json`。
 
+## 发布新版本
+
+打 tag 即触发 GitHub Actions，自动构建两套安装包并上传到 Release：
+
+```bash
+git tag v1.1.1
+git push origin v1.1.1
+```
+
+工作流见 [`.github/workflows/release.yml`](.github/workflows/release.yml)：
+
+- **macOS**：`pkgbuild` 生成 `Autonode-<version>.pkg`（postinstall 会为当前用户铺好配置和 LaunchAgent）
+- **Windows**：PyInstaller 生成 `Autonode.exe`（自带运行时），连同安装脚本打包成 `autonode-windows-<version>.zip`
+- 两个 job 都用 `softprops/action-gh-release` 上传到同名 Release
+
+> 产物未签名：macOS 需要右键打开，Windows 会触发 SmartScreen。
+
 ## 开发
 
 ```bash

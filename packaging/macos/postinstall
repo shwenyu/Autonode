@@ -1,0 +1,40 @@
+#!/bin/bash
+# Autonode macOS pkg 的 postinstall（CI 与本地构建共用）
+set -e
+SRC="/usr/local/share/autonode"
+CONSOLE_USER="$(stat -f%Su /dev/console)"
+if [ -z "$CONSOLE_USER" ] || [ "$CONSOLE_USER" = "root" ]; then
+  exit 0
+fi
+HOME_DIR="$(dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory | awk '{print $2}')"
+UID_N="$(id -u "$CONSOLE_USER")"
+DEST="$HOME_DIR/.config/autonode"
+mkdir -p "$DEST"
+cp "$SRC/autonode.py" "$DEST/autonode.py"
+chmod 700 "$DEST/autonode.py"
+chown -R "$CONSOLE_USER" "$DEST"
+
+PLIST="$HOME_DIR/Library/LaunchAgents/com.autonode.plist"
+mkdir -p "$HOME_DIR/Library/LaunchAgents"
+cat > "$PLIST" <<PLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.autonode</string>
+  <key>ProgramArguments</key><array>
+    <string>/usr/bin/python3</string>
+    <string>$DEST/autonode.py</string>
+    <string>--serve</string>
+  </array>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>$DEST/launchd.out.log</string>
+  <key>StandardErrorPath</key><string>$DEST/launchd.err.log</string>
+  <key>ProcessType</key><string>Background</string>
+</dict></plist>
+PLIST_EOF
+chown "$CONSOLE_USER" "$PLIST"
+
+launchctl asuser "$UID_N" launchctl bootout "gui/$UID_N/com.autonode" >/dev/null 2>&1 || true
+launchctl asuser "$UID_N" launchctl bootstrap "gui/$UID_N" "$PLIST" >/dev/null 2>&1 || true
+exit 0
