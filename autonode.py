@@ -37,7 +37,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.1.0"
+VERSION = "1.1.2"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -1143,7 +1143,7 @@ details summary{cursor:pointer;font-size:12px;color:var(--dim);margin-top:12px}
   <div>
     <h1>Autonode</h1>
     <div class="sub" style="margin-bottom:4px">关闭窗口只是关掉页面，后台服务继续运行；要点「退出」才会真正停止。</div>
-<div class="sub"><span id="state" class="badge">加载中</span> · <span id="ctl" class="muted"></span> · <span id="aistat" class="muted"></span> · <span class="muted">v1.1.0</span></div>
+<div class="sub"><span id="state" class="badge">加载中</span> · <span id="ctl" class="muted"></span> · <span id="aistat" class="muted"></span> · <span class="muted" id="ver"></span></div>
   </div>
   <div class="row">
     <button id="logbtn" class="ghost">日志</button>
@@ -1638,6 +1638,7 @@ function refresh(){
     el('ctl').textContent = CTL.kind==='unix' ? 'Clash Verge (unix socket)'
       : (CTL.kind==='tcp' ? ('控制器 '+CTL.target) : '未检测到客户端');
     el('state').textContent = '运行中'; el('state').className='badge ok';
+    if(el('ver')) el('ver').textContent = 'v' + (s.version || '');
     el('sub-import').textContent = (CTL.kind==='unix')?'在 Verge 中导入':'复制订阅链接';
     var ai = (s.groups||[]).filter(function(g){ return (g.config.role||'') === 'ai'; })[0];
     el('aistat').textContent = ai ? ('AI 通道：'+(ai.status.current||'-')+' · '+
@@ -1691,6 +1692,7 @@ class Handler(BaseHTTPRequestHandler):
                 groups.append({"id": gid, "label": runner.cfg.get("label", gid),
                                "status": snap, "config": runner.cfg})
             body = {"enabled": eng.cfg["enabled"], "port": eng.cfg["port"],
+                    "version": VERSION,
                     "controller": eng.controller,
                     "groups": groups, "region_choices": REGION_CHOICES}
             return self._send(200, json.dumps(body, ensure_ascii=False))

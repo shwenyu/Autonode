@@ -1,0 +1,34 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    name: syntax & smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 语法检查
+        run: python -m py_compile autonode.py
+
+      - name: 导入与页面冒烟
+        run: |
+          python - <<'PY'
+          import autonode
+          assert "Autonode" in autonode.PAGE
+          assert "分流规则" in autonode.PAGE
+          assert hasattr(autonode, "Engine")
+          assert hasattr(autonode, "AI_PROVIDERS")
+          print("import ok, providers:", len(autonode.AI_PROVIDERS))
+          PY
+
+      - name: 空环境 dry-run（无控制器时应优雅跳过）
+        run: python autonode.py --dry-run

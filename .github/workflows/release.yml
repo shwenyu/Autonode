@@ -15,6 +15,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Inject version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          /usr/bin/sed -i '' -E "s/^VERSION = .*/VERSION = \"${VERSION}\"/" autonode.py
+          grep -n '^VERSION = ' autonode.py
+
       - name: Build pkg
         run: |
           set -euo pipefail
@@ -48,6 +54,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Inject version
+        shell: pwsh
+        run: |
+          $v = $env:GITHUB_REF_NAME.TrimStart('v')
+          (Get-Content autonode.py) -replace '^VERSION = .*', "VERSION = `"$v`"" | Set-Content autonode.py -Encoding UTF8
+          Select-String -Path autonode.py -Pattern '^VERSION = '
 
       - name: Build exe
         run: |

@@ -33,6 +33,20 @@ if /i "%PROCESSOR_ARCHITECTURE%"=="x86" (
 )
 echo.
 
+rem ---------- 自带运行时的 exe 优先 ----------
+if exist "%~dp0Autonode.exe" (
+  echo ==^> 检测到 Autonode.exe（自带 Python 运行时），直接安装 ...
+  start "" "%~dp0Autonode.exe"
+  timeout /t 4 >nul
+  start "" "http://127.0.0.1:8765/"
+  echo.
+  echo     安装程序已启动，会弹窗显示安装信息。
+  echo     如果没有弹出，请手动双击 Autonode.exe
+  echo.
+  pause
+  exit /b 0
+)
+
 rem ---------- 检测 Python ----------
 echo ==^> 检测 Python
 set "PY="
