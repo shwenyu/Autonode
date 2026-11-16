@@ -11,6 +11,15 @@
 
 ---
 
+## 界面
+
+<p align="center">
+  <img src="docs/screenshots/groups.png" width="820" alt="分组">
+</p>
+
+浅色、卡片化、近乎无色的界面；只有关键状态（运行中 / TUN 开关 / 错误）带一点颜色。
+更多截图见 [docs/screenshots](docs/screenshots)。
+
 ## 解决什么
 
 AI 站点（ChatGPT / Claude / Gemini）会查 IP 异常，**频繁换节点反而更容易掉登录**；

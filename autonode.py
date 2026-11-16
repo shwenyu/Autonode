@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -1530,47 +1530,124 @@ PAGE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Autonode</title>
 <style>
-:root{--bg:#0f1115;--card:#171a21;--line:#262b36;--fg:#e6e9ef;--dim:#8b93a7;--ok:#43c884;--warn:#e0b341;--bad:#e05a5a;--accent:#4c8dff}
+:root{
+  --bg:#f5f5f7;
+  --surface:#ffffff;
+  --surface-2:#f2f2f7;
+  --surface-3:#e9e9ee;
+  --text:#1d1d1f;
+  --text-2:#5f5f66;
+  --text-3:#6f6f76;
+  --line:rgba(0,0,0,.07);
+  --line-soft:rgba(0,0,0,.04);
+  --accent:#0071e3;
+  --ok:#1a7f37;
+  --warn:#8a5a00;
+  --bad:#c62828;
+  --radius:18px;
+  --shadow:0 1px 2px rgba(0,0,0,.03), 0 10px 30px rgba(0,0,0,.05);
+}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
-.wrap{max-width:1020px;margin:0 auto;padding:22px 18px 60px}
-h1{font-size:17px;margin:0 0 3px}
-.sub{color:var(--dim);font-size:12px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:14px}
-.card h2{font-size:13px;margin:0 0 10px;color:var(--dim);font-weight:600}
-.hd{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
-.nav{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px}
-.nav button{padding:8px 15px;border-radius:10px;border:1px solid var(--line);background:#171a21;color:var(--fg);font-size:13px;cursor:pointer}
-.nav button.on{background:var(--accent);border-color:var(--accent);color:#fff}
-button{background:#232936;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:7px 13px;font-size:13px;cursor:pointer}
-button:hover{border-color:#3a4358}
-button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-button.ghost{background:transparent}
-.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;background:#232936;color:var(--dim)}
-.badge.ok{background:rgba(67,200,132,.15);color:var(--ok)}
-.badge.warn{background:rgba(224,179,65,.15);color:var(--warn)}
-.badge.bad{background:rgba(224,90,90,.15);color:var(--bad)}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-@media(max-width:760px){.grid{grid-template-columns:1fr}}
-.muted{color:var(--dim)}
-.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.big{font-size:17px;font-weight:600;word-break:break-all}
+html,body{height:100%}
+body{
+  margin:0;background:var(--bg);color:var(--text);
+  font:15px/1.55 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",sans-serif;
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+}
+.wrap{max-width:980px;margin:0 auto;padding:36px 24px 90px}
+h1{font-size:22px;font-weight:600;letter-spacing:-.015em;margin:0 0 4px}
+.sub{color:var(--text-2);font-size:13px}
+.muted{color:var(--text-2)}
+.mono{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;font-size:12.5px}
+.big{font-size:19px;font-weight:600;letter-spacing:-.01em;word-break:break-all}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-label{display:block;margin:8px 0 4px;font-size:12px;color:var(--dim)}
-input,select{background:#11141a;border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:7px 10px;font-size:13px;width:100%}
-.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
-.chip{display:flex;align-items:center;gap:5px;background:#11141a;border:1px solid var(--line);border-radius:999px;padding:4px 9px;font-size:12px;cursor:pointer}
-.chip input{width:auto;margin:0}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+@media(max-width:760px){.grid{grid-template-columns:1fr}}
+
+/* 顶栏 */
+.hd{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:26px}
+.hd .row{gap:6px}
+
+/* 分段控制（导航） */
+.nav{display:inline-flex;gap:2px;background:var(--surface-2);border-radius:12px;padding:3px;margin-bottom:22px;flex-wrap:wrap}
+.nav button{
+  appearance:none;border:0;background:transparent;color:var(--text-2);
+  padding:7px 15px;border-radius:9px;font-size:13px;font-weight:500;cursor:pointer;
+  transition:background .25s ease,color .25s ease,box-shadow .25s ease;
+}
+.nav button:hover{color:var(--text)}
+.nav button.on{background:var(--surface);color:var(--text);box-shadow:0 1px 2px rgba(0,0,0,.08),0 0 0 .5px rgba(0,0,0,.02)}
+
+/* 卡片 */
+.card{
+  background:var(--surface);border-radius:var(--radius);padding:22px;margin-bottom:16px;
+  box-shadow:var(--shadow);
+  animation:rise .4s cubic-bezier(.2,.7,.3,1) both;
+}
+.card h2{font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);margin:0 0 12px}
+
+@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@media(prefers-reduced-motion:reduce){.card{animation:none}*{transition:none!important}}
+
+/* 按钮 */
+button{
+  appearance:none;border:0;background:var(--surface-2);color:var(--text);
+  border-radius:10px;padding:7px 14px;font-size:13px;font-weight:500;cursor:pointer;
+  transition:background .22s ease,color .22s ease,opacity .22s ease;
+}
+button:hover{background:var(--surface-3)}
+button:active{opacity:.72}
+button.primary{background:var(--accent);color:#fff}
+button.primary:hover{background:#0066cc}
+button.ghost{background:transparent;color:var(--text-2);padding:7px 10px}
+button.ghost:hover{background:var(--surface-2);color:var(--text)}
+button:disabled{opacity:.45;cursor:default}
+
+/* 表单 */
+label{display:block;margin:12px 0 5px;font-size:12px;color:var(--text-3);font-weight:500}
+input,select{
+  width:100%;background:var(--surface-2);border:1px solid transparent;color:var(--text);
+  border-radius:10px;padding:8px 11px;font-size:13px;font-family:inherit;
+  transition:background .2s ease,border-color .2s ease,box-shadow .2s ease;
+}
+input::placeholder{color:var(--text-3)}
+input:focus,select:focus{
+  outline:none;background:var(--surface);border-color:rgba(0,113,227,.45);
+  box-shadow:0 0 0 3.5px rgba(0,113,227,.12);
+}
+select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--text-3) 50%),linear-gradient(135deg,var(--text-3) 50%,transparent 50%);background-position:calc(100% - 16px) 55%,calc(100% - 11px) 55%;background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:30px}
+
+/* 状态徽标 */
+.badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:500;background:var(--surface-2);color:var(--text-2)}
+.badge.ok{background:rgba(52,199,89,.12);color:var(--ok)}
+.badge.warn{background:rgba(255,159,10,.14);color:var(--warn)}
+.badge.bad{background:rgba(255,59,48,.12);color:var(--bad)}
+
+/* 表格 */
 table{width:100%;border-collapse:collapse;font-size:13px}
-th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line)}
-th{color:var(--dim);font-weight:500;font-size:12px}
-pre{background:#11141a;border:1px solid var(--line);border-radius:8px;padding:12px;max-height:60vh;overflow:auto;font-size:12px;margin:0;white-space:pre-wrap}
-details summary{cursor:pointer;font-size:12px;color:var(--dim);margin-top:12px}
-.ghd{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
-.gname{font-weight:600}
-.modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;padding:30px;z-index:50}
+th{text-align:left;padding:8px 6px;color:var(--text-3);font-weight:500;font-size:11.5px;letter-spacing:.05em;text-transform:uppercase;border-bottom:1px solid var(--line)}
+td{text-align:left;padding:11px 6px;border-bottom:1px solid var(--line-soft);vertical-align:middle}
+tr:last-child td{border-bottom:0}
+
+/* 分组卡片头部 */
+.ghd{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.ghd .row{gap:6px}
+.gname{font-weight:600;letter-spacing:-.01em}
+
+/* 其他 */
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.chip{display:flex;align-items:center;gap:6px;background:var(--surface-2);border-radius:10px;padding:6px 10px;font-size:12.5px;color:var(--text);cursor:pointer;user-select:none}
+.chip input{width:auto;margin:0}
+details summary{cursor:pointer;font-size:13px;color:var(--text-2);margin-top:16px;padding:4px 0}
+details summary:hover{color:var(--text)}
+pre{background:var(--surface-2);border-radius:12px;padding:14px;max-height:60vh;overflow:auto;font-size:12px;line-height:1.5;margin:0;white-space:pre-wrap;color:#333}
+
+/* 弹窗 */
+.modal{position:fixed;inset:0;background:rgba(20,20,22,.28);backdrop-filter:saturate(140%) blur(8px);-webkit-backdrop-filter:saturate(140%) blur(8px);display:flex;align-items:center;justify-content:center;padding:26px;z-index:50;animation:fade .22s ease both}
 .modal[hidden]{display:none}
-.modal .box{background:var(--card);border:1px solid var(--line);border-radius:12px;width:min(900px,100%);max-height:80vh;padding:16px;display:flex;flex-direction:column;gap:10px}
+.modal .box{background:var(--surface);border-radius:20px;width:min(880px,100%);max-height:84vh;padding:22px;display:flex;flex-direction:column;gap:12px;box-shadow:0 24px 70px rgba(0,0,0,.22);animation:pop .26s cubic-bezier(.2,.7,.3,1) both}
+@keyframes fade{from{opacity:0}to{opacity:1}}
+@keyframes pop{from{opacity:0;transform:translateY(8px) scale(.985)}to{opacity:1;transform:none}}
 </style></head>
 <body><div class="wrap">
 
@@ -1613,7 +1690,7 @@ details summary{cursor:pointer;font-size:12px;color:var(--dim);margin-top:12px}
 <section id="sec-routes" hidden>
   <div class="card">
     <div class="row" style="justify-content:space-between">
-      <div><b>TUN 状态</b> <span id="tun-badge" class="badge">-</span></div>
+      <div><h2 style="margin:0;display:inline">TUN 状态</h2> <span id="tun-badge" class="badge">-</span></div>
       <button id="tun-refresh" class="ghost">刷新</button>
     </div>
     <div class="muted" id="tun-info" style="margin-top:8px">-</div>
@@ -1684,7 +1761,7 @@ details summary{cursor:pointer;font-size:12px;color:var(--dim);margin-top:12px}
     <div class="muted" id="apps-note" style="margin-top:8px">-</div>
     <table style="margin-top:10px">
       <thead><tr><th>应用</th><th style="width:60px">连接</th><th style="width:130px">流量</th>
-      <th>命中规则</th><th style="width:150px">当前出口</th><th style="width:70px"></th></tr></thead>
+      <th>命中规则</th><th style="width:150px">当前出口</th><th style="width:86px"></th></tr></thead>
       <tbody id="apps-body"></tbody>
     </table>
   </div>
@@ -1792,6 +1869,7 @@ function get(u){ return fetch(u,{cache:'no-store'}).then(function(r){return r.js
 document.querySelectorAll('[data-nav]').forEach(function(b){
   b.onclick = function(){
     NAV = b.dataset.nav;
+    if(location.hash !== '#' + NAV){ try{ history.replaceState(null,'','#'+NAV); }catch(e){} }
     document.querySelectorAll('[data-nav]').forEach(function(x){ x.classList.toggle('on', x===b); });
     ['groups','routes','sub','site','vpn','apps'].forEach(function(n){ el('sec-'+n).hidden = (n!==NAV); });
     if(NAV==='routes'){ loadRoutes(); loadTun(); }
@@ -1898,14 +1976,16 @@ function loadApps(){
     var tb = el('apps-body');
     tb.innerHTML = (d.apps || []).map(function(a){
       var q = String(a.name).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
-      var out = (a.outbound || []).join(' / ') || '-';
-      var cls = /DIRECT/i.test(out) ? '' : 'ok';
+      var outs = a.outbound || [];
+      var out = outs.length ? (outs[0] + (outs.length > 1 ? ' 等' + outs.length + '个' : '')) : '-';
+      var cls = '';
+      var outColor = /DIRECT/i.test(out) ? 'var(--text-3)' : 'var(--text)';
       return '<tr><td><div class="mono">'+a.name+'</div>'
         + '<div class="muted" style="font-size:11px">'+((a.hosts||[])[0]||'')+'</div></td>'
         + '<td>'+a.conns+'</td><td>'+fmtBytes(a.download)+' ↓</td>'
         + '<td class="muted" style="font-size:12px">'+((a.rules||[])[0]||'-')+'</td>'
-        + '<td><span class="badge '+cls+'">'+out+'</span></td>'
-        + '<td><button data-apprule="'+q+'">加规则</button></td></tr>';
+        + '<td><span class="badge '+cls+'" style="white-space:nowrap;color:'+outColor+'">'+out+'</span></td>'
+        + '<td><button class="ghost" data-apprule="'+q+'" style="white-space:nowrap">＋规则</button></td></tr>';
     }).join('') || '<tr><td colspan="6" class="muted">当前没有带进程信息的连接</td></tr>';
 
     var dl = el('proc-list');
@@ -2098,6 +2178,12 @@ document.addEventListener('click', function(e){
 
 loadProviders();
 loadRoutes();
+
+(function(){
+  var t = (location.hash || '').replace('#','');
+  var b = t && document.querySelector('[data-nav="' + t + '"]');
+  if(b){ b.click(); }
+})();
 
 var logTimer = null;
 
@@ -2506,6 +2592,8 @@ function refresh(){
     renderGroups(s);
     updateGroups(s);
     if(NAV==='site') fillSiteGroups(s);
+    var rtSel = el('rt-target');
+    if(rtSel && !rtSel.dataset.init && NAV==='routes') loadRoutes();
     if(!el('addsel').options.length || el('addsel').options[0].value==='') loadAvailable();
    })
    .catch(function(){
