@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.5.5"
+VERSION = "1.6.0"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -742,6 +742,47 @@ def apply_update(asset_url, asset_name, mode="install"):
                 return {"ok": False, "error": "拉起安装失败：%s" % exc, "file": dest}
     subprocess.run(["open", dest], capture_output=True)
     return {"ok": True, "mode": "download", "file": dest, "message": "已下载并打开，请按提示完成安装"}
+
+
+def live_apps():
+    """按进程聚合当前连接，给出每个应用实际走的出口。"""
+    ctx = controller_ctx(load_config())
+    try:
+        data = api(ctx, "GET", "/connections", timeout=10)
+        cfg = api(ctx, "GET", "/configs", timeout=10)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    agg = {}
+    for c in data.get("connections") or []:
+        meta = c.get("metadata") or {}
+        name = meta.get("process") or ""
+        if not name:
+            continue
+        item = agg.setdefault(name, {"name": name, "path": meta.get("processPath") or "",
+                                     "conns": 0, "upload": 0, "download": 0,
+                                     "rules": set(), "outbound": set(), "hosts": set()})
+        item["conns"] += 1
+        item["upload"] += c.get("upload") or 0
+        item["download"] += c.get("download") or 0
+        if c.get("rule"):
+            item["rules"].add("%s %s" % (c.get("rule"), c.get("rulePayload") or ""))
+        chains = c.get("chains") or []
+        if chains:
+            item["outbound"].add(chains[0])
+        if meta.get("host"):
+            item["hosts"].add(meta["host"])
+    apps = []
+    for v in agg.values():
+        apps.append({"name": v["name"], "path": v["path"], "conns": v["conns"],
+                     "upload": v["upload"], "download": v["download"],
+                     "rules": sorted(v["rules"])[:3], "outbound": sorted(v["outbound"]),
+                     "hosts": sorted(v["hosts"])[:3]})
+    apps.sort(key=lambda a: -(a["upload"] + a["download"]))
+    tun = cfg.get("tun") or {}
+    return {"ok": True, "apps": apps, "count": len(apps),
+            "tun": bool(tun.get("enable")),
+            "find_process_mode": cfg.get("find-process-mode") or "",
+            "mode": cfg.get("mode") or ""}
 
 
 def tun_state():
@@ -1553,6 +1594,7 @@ details summary{cursor:pointer;font-size:12px;color:var(--dim);margin-top:12px}
   <button data-nav="sub">订阅</button>
   <button data-nav="site">站点诊断</button>
   <button data-nav="vpn">VPN</button>
+  <button data-nav="apps">应用</button>
 </div>
 
 <section id="sec-groups">
@@ -1630,6 +1672,34 @@ details summary{cursor:pointer;font-size:12px;color:var(--dim);margin-top:12px}
     </div>
     <div class="muted" id="site-msg" style="margin-top:8px">未运行</div>
     <div id="site-res" style="margin-top:10px"></div>
+  </div>
+</section>
+
+<section id="sec-apps" hidden>
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <div><b>应用分流</b> <span id="apps-badge" class="badge">-</span></div>
+      <button id="apps-refresh" class="ghost">刷新</button>
+    </div>
+    <div class="muted" id="apps-note" style="margin-top:8px">-</div>
+    <table style="margin-top:10px">
+      <thead><tr><th>应用</th><th style="width:60px">连接</th><th style="width:130px">流量</th>
+      <th>命中规则</th><th style="width:150px">当前出口</th><th style="width:70px"></th></tr></thead>
+      <tbody id="apps-body"></tbody>
+    </table>
+  </div>
+  <div class="card">
+    <h2>进程规则</h2>
+    <div class="muted" style="margin-bottom:8px">按进程名匹配，优先级按规则顺序。仅在 TUN 开启时对所有应用生效；未开 TUN 时只影响走系统代理的应用。</div>
+    <table><thead><tr><th>进程</th><th style="width:200px">走向</th><th style="width:60px"></th></tr></thead>
+    <tbody id="proc-body"></tbody></table>
+    <div class="row" style="margin-top:10px">
+      <input id="proc-name" list="proc-list" placeholder="进程名，例如 codex" style="flex:1">
+      <datalist id="proc-list"></datalist>
+      <select id="proc-target" style="width:200px"></select>
+      <button id="proc-add">添加规则</button>
+      <span class="muted" id="proc-msg"></span>
+    </div>
   </div>
 </section>
 
@@ -1723,10 +1793,11 @@ document.querySelectorAll('[data-nav]').forEach(function(b){
   b.onclick = function(){
     NAV = b.dataset.nav;
     document.querySelectorAll('[data-nav]').forEach(function(x){ x.classList.toggle('on', x===b); });
-    ['groups','routes','sub','site','vpn'].forEach(function(n){ el('sec-'+n).hidden = (n!==NAV); });
+    ['groups','routes','sub','site','vpn','apps'].forEach(function(n){ el('sec-'+n).hidden = (n!==NAV); });
     if(NAV==='routes'){ loadRoutes(); loadTun(); }
     if(NAV==='site' && STATUS) fillSiteGroups(STATUS);
     if(NAV==='vpn') loadVpns();
+    if(NAV==='apps'){ loadRoutes(); loadApps(); }
   };
 });
 
@@ -1789,6 +1860,110 @@ document.addEventListener('change', function(e){
     el('rg-msg').textContent = '已保存：' + sel.dataset.rg + ' → ' + (sel.value || '未设置');
   });
 });
+
+function fmtBytes(n){
+  n = n || 0;
+  if(n > 1048576) return (n/1048576).toFixed(1) + ' MB';
+  if(n > 1024) return (n/1024).toFixed(0) + ' KB';
+  return n + ' B';
+}
+
+function renderProcRules(){
+  var rows = (ROUTES || []).filter(function(r){ return r.type === 'PROCESS-NAME'; });
+  var tb = el('proc-body');
+  if(!tb) return;
+  tb.innerHTML = rows.map(function(r, i){
+    var idx = ROUTES.indexOf(r);
+    var opts = RT_TARGETS.map(function(t){
+      var q = String(t).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+      return '<option value="'+q+'"'+(t===r.target?' selected':'')+'>'+t+'</option>';
+    }).join('');
+    return '<tr><td class="mono">'+r.value+'</td><td><select data-proct="'+idx+'" style="width:100%">'+opts+'</select></td>'
+      + '<td><button data-procdel="'+idx+'">删</button></td></tr>';
+  }).join('') || '<tr><td colspan="3" class="muted">还没有进程规则</td></tr>';
+}
+
+function loadApps(){
+  get('/api/apps').then(function(d){
+    var badge = el('apps-badge');
+    if(!d.ok){ if(badge){ badge.textContent='读取失败'; badge.className='badge bad'; } return; }
+    if(badge){
+      badge.textContent = d.tun ? 'TUN 已开启' : 'TUN 已关闭';
+      badge.className = 'badge ' + (d.tun ? 'ok' : 'warn');
+    }
+    el('apps-note').textContent = '进程识别模式 ' + (d.find_process_mode || '-')
+      + (d.tun ? ' · 所有应用流量均经过内核' : ' · TUN 关闭时仅走系统代理的应用可见')
+      + ' · 共 ' + d.count + ' 个应用';
+
+    var tb = el('apps-body');
+    tb.innerHTML = (d.apps || []).map(function(a){
+      var q = String(a.name).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+      var out = (a.outbound || []).join(' / ') || '-';
+      var cls = /DIRECT/i.test(out) ? '' : 'ok';
+      return '<tr><td><div class="mono">'+a.name+'</div>'
+        + '<div class="muted" style="font-size:11px">'+((a.hosts||[])[0]||'')+'</div></td>'
+        + '<td>'+a.conns+'</td><td>'+fmtBytes(a.download)+' ↓</td>'
+        + '<td class="muted" style="font-size:12px">'+((a.rules||[])[0]||'-')+'</td>'
+        + '<td><span class="badge '+cls+'">'+out+'</span></td>'
+        + '<td><button data-apprule="'+q+'">加规则</button></td></tr>';
+    }).join('') || '<tr><td colspan="6" class="muted">当前没有带进程信息的连接</td></tr>';
+
+    var dl = el('proc-list');
+    if(dl) dl.innerHTML = (d.apps || []).map(function(a){
+      return '<option value="'+String(a.name).replace(/"/g,'&quot;')+'">';
+    }).join('');
+
+    var sel = el('proc-target');
+    if(sel && !sel.options.length){
+      sel.innerHTML = RT_TARGETS.map(function(t){
+        var q = String(t).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+        return '<option value="'+q+'">'+t+'</option>';
+      }).join('');
+    }
+    renderProcRules();
+  }).catch(function(){});
+}
+
+if(el('apps-refresh')) el('apps-refresh').onclick = function(){ loadRoutes(); loadApps(); };
+
+document.addEventListener('click', function(e){
+  var t = e.target;
+  if(!t || !t.closest) return;
+  var b = t.closest('button[data-apprule]');
+  if(b){
+    el('proc-name').value = b.dataset.apprule;
+    el('proc-name').focus();
+    return;
+  }
+  var d = t.closest('button[data-procdel]');
+  if(d){
+    ROUTES.splice(parseInt(d.dataset.procdel, 10), 1);
+    saveRoutes().then(renderProcRules);
+  }
+});
+
+document.addEventListener('change', function(e){
+  var s = e.target;
+  if(!s || !s.matches || !s.matches('select[data-proct]')) return;
+  var i = parseInt(s.dataset.proct, 10);
+  if(ROUTES[i]){ ROUTES[i].target = s.value; saveRoutes(); }
+});
+
+if(el('proc-add')) el('proc-add').onclick = function(){
+  var name = (el('proc-name').value || '').trim();
+  var target = el('proc-target').value || '';
+  if(!name){ el('proc-msg').textContent = '先填进程名'; return; }
+  if(!target || target === 'DIRECT' || target === 'REJECT'){
+    el('proc-msg').textContent = '先选一个分组';
+    return;
+  }
+  ROUTES.push({type: 'PROCESS-NAME', value: name, target: target});
+  saveRoutes().then(function(){
+    el('proc-msg').textContent = '已添加 PROCESS-NAME,' + name + ' → ' + target;
+    el('proc-name').value = '';
+    renderProcRules();
+  });
+};
 
 function loadTun(){
   get('/api/tun').then(function(d){
@@ -2459,6 +2634,8 @@ class Handler(BaseHTTPRequestHandler):
                                               ensure_ascii=False))
         if path == "/api/update/check":
             return self._send(200, json.dumps(check_update(), ensure_ascii=False))
+        if path == "/api/apps":
+            return self._send(200, json.dumps(live_apps(), ensure_ascii=False))
         if path == "/api/tun":
             return self._send(200, json.dumps(tun_state(), ensure_ascii=False))
         if path == "/api/update/apply":
