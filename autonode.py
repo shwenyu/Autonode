@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.8.2"
+VERSION = "1.8.3"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -566,21 +566,80 @@ def windows_self_install():
     return True
 
 
+def _prefs_vpn_services():
+    """从系统网络配置里读取 VPN 服务（scutil 看不到时的兜底）。"""
+    try:
+        with open("/Library/Preferences/SystemConfiguration/preferences.plist", "rb") as fh:
+            data = plistlib.load(fh)
+    except Exception:
+        return []
+    out = []
+    for sid, svc in (data.get("NetworkServices") or {}).items():
+        itf = svc.get("Interface") or {}
+        itype = itf.get("Type") or ""
+        sub = itf.get("SubType") or ""
+        if itype != "VPN" and not (itype == "PPP" and sub):
+            continue
+        out.append({"id": sid, "name": svc.get("UserDefinedName") or sid,
+                    "proto": ("%s/%s" % (itype, sub)).strip("/")})
+    return out
+
+
+def _active_tunnel():
+    """当前默认路由是否走的 utun 隧道（系统 VPN / 其它代理的 TUN）。"""
+    try:
+        out = subprocess.run(["route", "-n", "get", "default"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return None
+    m = re.search(r"interface:\s*(\S+)", out)
+    if not m or not m.group(1).startswith("utun"):
+        return None
+    iface = m.group(1)
+    ip = ""
+    try:
+        cfg = subprocess.run(["ifconfig", iface], capture_output=True, text=True, timeout=5).stdout
+        mm = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", cfg)
+        if mm:
+            ip = mm.group(1)
+    except Exception:
+        pass
+    return {"iface": iface, "ip": ip}
+
+
 def list_system_vpns():
-    """列出 macOS 系统 VPN（L2TP / IKEv2 / IPSec / 第三方 tunnel）。"""
+    """列出系统 VPN：scutil 优先，失败时回退到网络配置。"""
     if not IS_MAC:
         return []
+    vpns = []
+    seen = set()
     try:
         out = subprocess.run(["scutil", "--nc", "list"], capture_output=True,
                              text=True, timeout=10).stdout
+        for line in out.splitlines():
+            m = re.match(r'^\*?\s*\(([^)]+)\)\s+(\S+)\s+(\S+)\s+"([^"]+)"\s+\[([^\]]+)\]',
+                         line.strip())
+            if m:
+                vpns.append({"status": m.group(1), "id": m.group(2), "type": m.group(3),
+                             "name": m.group(4), "proto": m.group(5)})
+                seen.add(m.group(4))
     except Exception:
-        return []
-    vpns = []
-    for line in out.splitlines():
-        m = re.match(r'^\*?\s*\(([^)]+)\)\s+(\S+)\s+(\S+)\s+"([^"]+)"\s+\[([^\]]+)\]', line.strip())
-        if m:
-            vpns.append({"status": m.group(1), "id": m.group(2), "type": m.group(3),
-                         "name": m.group(4), "proto": m.group(5)})
+        pass
+
+    for svc in _prefs_vpn_services():
+        if svc["name"] in seen:
+            continue
+        status = "Unknown"
+        try:
+            st = subprocess.run(["scutil", "--nc", "status", svc["name"]],
+                                capture_output=True, text=True, timeout=5).stdout
+            first = (st or "").strip().splitlines()
+            if first and first[0].strip():
+                status = first[0].strip()
+        except Exception:
+            pass
+        vpns.append({"status": status, "id": svc["id"], "type": "VPN",
+                     "name": svc["name"], "proto": svc["proto"]})
     return vpns
 
 
@@ -1858,8 +1917,9 @@ pre{background:#f8f9fb;border-radius:12px;padding:14px;max-height:60vh;overflow:
     <div class="row" style="margin-top:10px">
       <button id="vpn-new" class="primary">新建 VPN</button>
       <button id="vpn-refresh">刷新</button>
-      <a class="muted" href="x-apple.systempreferences:com.apple.Network-Settings.extension">打开系统设置 →</a>
+      <a class="muted" id="vpn-settings" href="x-apple.systempreferences:com.apple.NetworkExtensionSettingsUI.NESettingsUIExtension">打开 VPN 设置 →</a>
     </div>
+    <div class="muted" id="vpn-tunnel" style="margin-top:6px"></div>
     <table style="margin-top:10px">
       <thead><tr><th>名称</th><th>类型</th><th>状态</th><th style="width:80px">保持</th><th style="width:100px"></th></tr></thead>
       <tbody id="vpn-body"></tbody>
@@ -2196,11 +2256,16 @@ if(el('up-apply')) el('up-apply').onclick = function(){
 
 function loadVpns(){
   get('/api/vpn').then(function(d){
+    var STATE = {'Connected':['已连接','ok'], 'Disconnected':['未连接',''],
+                 'Connecting':['连接中…','warn'], 'Disconnecting':['断开中…','warn'],
+                 'Unknown':['未注册','warn']};
     var rows = (d.vpns||[]).map(function(v){
       var q = String(v.name).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+      var st = STATE[v.status] || [v.status, ''];
       var on = (v.status === 'Connected');
       var on2 = (d.keep||[]).indexOf(v.name) >= 0;
-      return '<tr><td>'+v.name+'</td><td>'+v.proto+'</td><td>'+v.status+'</td>'
+      return '<tr><td>'+v.name+'</td><td class="muted">'+v.proto+'</td>'
+        + '<td><span class="badge '+st[1]+'">'+st[0]+'</span></td>'
         + '<td><input type="checkbox" data-keep="'+q+'"'+(on2?' checked':'')+'></td><td>'
         + (on ? '<button data-vpn="disconnect" data-name="'+q+'">断开</button>'
               : '<button data-vpn="connect" data-name="'+q+'">连接</button>')
@@ -2208,8 +2273,24 @@ function loadVpns(){
     }).join('');
     var tb = el('vpn-body');
     if(tb) tb.innerHTML = rows || '<tr><td colspan="5" class="muted">系统里没有找到 VPN 配置（可在系统设置里添加）</td></tr>';
+    var link = el('vpn-settings');
+    if(link && d.settings_url) link.setAttribute('href', d.settings_url);
+
+    var tun = el('vpn-tunnel');
+    if(tun){
+      if(d.tunnel){
+        tun.textContent = '检测到系统隧道 ' + d.tunnel.iface
+          + (d.tunnel.ip ? '（' + d.tunnel.ip + '）' : '') + '：当前默认路由已由它接管';
+      } else {
+        tun.textContent = '';
+      }
+    }
+
     var msg = el('vpn-msg');
-    if(msg) msg.textContent = (d.platform && d.platform !== 'Darwin') ? ('当前平台 ' + d.platform + ' 暂不支持') : '';
+    if(msg) msg.textContent = (d.platform && d.platform !== 'Darwin')
+      ? ('当前平台 ' + d.platform + ' 暂不支持')
+      : ((d.vpns||[]).length && (d.vpns||[]).every(function(v){ return v.status === 'Unknown'; })
+          ? '这些配置未在当前网络集注册——去「打开 VPN 设置」里重新启用一次，之后这里就能连接/断开。' : '');
   }).catch(function(){});
 }
 
@@ -2858,6 +2939,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/vpn":
             return self._send(200, json.dumps({
                 "ok": True, "vpns": list_system_vpns(), "platform": platform.system(),
+                "tunnel": _active_tunnel(),
+                "settings_url": "x-apple.systempreferences:com.apple.NetworkExtensionSettingsUI.NESettingsUIExtension",
                 "keep": eng.cfg.get("vpn_keep") or [],
                 "interval": eng.cfg.get("vpn_interval", 60)}, ensure_ascii=False))
         if path == "/api/presets/ai-providers":
