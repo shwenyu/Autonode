@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.8.1"
+VERSION = "1.8.2"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -2325,7 +2325,7 @@ function groupCard(g){
     + '<div class="ghd"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
     + '<button class="iconbtn" data-act="collapse" title="收起/展开">'
     + '<svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>'
-    + '<span class="gname">'+g.label+'</span> <span class="badge" data-role="state">-</span>'
+    + '<span class="gname">'+g.label+'</span> <span class="badge" data-role="role" style="display:none"></span>'
     + ' <span class="gsum" data-role="summary"></span></div>'
     + '<div class="row"><button data-act="run">立即检测</button>'
     + '<button data-act="toggle" class="ghost">暂停</button>'
@@ -2444,8 +2444,11 @@ function updateGroups(s){
     var card = document.querySelector('.gcard[data-gid="'+g.id+'"]'); if(!card) return;
     var st = g.status || {}, d = st.last_detail || {};
     var rb = card.querySelector('[data-role="role"]');
-    if(rb){ rb.textContent = (g.config.role === 'ai') ? 'AI 通道' : '通用';
-            rb.className = 'badge ' + (g.config.role === 'ai' ? 'warn' : ''); }
+    if(rb){
+      rb.textContent = (g.config.role === 'ai') ? 'AI 通道' : '通用';
+      rb.className = 'badge ' + (g.config.role === 'ai' ? 'warn' : '');
+      rb.style.display = '';
+    }
     card.querySelector('[data-role="current"]').textContent = st.current || '未知';
     card.querySelector('[data-role="meta"]').textContent = (st.current_ms ? st.current_ms+' ms' : '延迟未知');
     var hold = st.hold_remaining > 0 ? ' · 手动锁定 '+Math.ceil(st.hold_remaining/60)+' 分钟' : '';
