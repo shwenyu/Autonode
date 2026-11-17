@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.9.0"
+VERSION = "2.0.0"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -1775,6 +1775,15 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
 .gcard td button{padding:5px 10px;font-size:12px;white-space:nowrap}
 .gcard td:last-child{width:78px}
 
+.bars{display:flex;align-items:flex-end;gap:6px;height:64px}
+.bar{flex:1;background:#e9ecf0;border-radius:6px;min-height:8px;transition:height .32s ease}
+.quick{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.quick button{display:flex;flex-direction:column;align-items:flex-start;gap:3px;padding:14px;
+  border:1px solid var(--line);background:#fff;text-align:left;font-size:13px;font-weight:500;border-radius:10px}
+.quick button span{font-size:11.5px;color:var(--text-3);font-weight:400}
+.quick button:hover{background:#fafbfc;border-color:#e3e6ea}
+@media(max-width:900px){.quick{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
 /* 弹窗 */
 .modal{position:fixed;inset:0;background:rgba(17,17,17,.28);
   backdrop-filter:saturate(120%) blur(6px);-webkit-backdrop-filter:saturate(120%) blur(6px);
@@ -1817,7 +1826,10 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
       <button class="navhead" data-toggle="nodes">节点
         <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
       <div class="navsub">
-        <button data-nav="groups" class="on">
+        <button data-nav="overview" class="on">
+          <svg viewBox="0 0 24 24"><path d="M4 11.5 12 4l8 7.5"/><path d="M6.5 10v9h11v-9"/></svg>
+          概览</button>
+        <button data-nav="groups">
           <svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="7" rx="2"/><rect x="3.5" y="13.5" width="7" height="7" rx="2"/><rect x="13.5" y="13.5" width="7" height="7" rx="2"/></svg>
           分组</button>
         <button data-nav="routes">
@@ -1856,9 +1868,9 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
 
 <div class="main">
   <header class="topbar">
-    <h1 id="pagetitle">分组</h1>
+    <h1 id="pagetitle">概览</h1>
     <div class="row">
-      <button id="updatebtn" class="ghost">检查更新</button>
+      <button id="updatebtn" class="primary" style="display:none">更新</button>
       <button id="logbtn" class="ghost">日志</button>
       <button id="restartbtn" class="ghost">重启服务</button>
       <button id="quitbtn" class="ghost">退出</button>
@@ -1866,7 +1878,50 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
   </header>
   <div class="content">
 
-<section id="sec-groups">
+<section id="sec-overview">
+  <div class="card">
+    <div class="row" style="justify-content:space-between;align-items:flex-start">
+      <div>
+        <div class="muted" style="font-size:12px">当前出口</div>
+        <div id="ov-groups" style="margin-top:8px"></div>
+      </div>
+      <div class="row" style="gap:6px">
+        <span id="ov-mode" class="badge">模式 —</span>
+        <span id="ov-tun" class="badge">TUN —</span>
+        <span id="ov-vpn" class="badge">VPN —</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="kpis">
+    <div class="kpi"><div class="klabel">控制器</div><div class="kval" id="ov-ctl">—</div><div class="kfoot" id="ov-ctl-foot">—</div></div>
+    <div class="kpi"><div class="klabel">混合端口</div><div class="kval" id="ov-port">—</div><div class="kfoot">本地代理入口</div></div>
+    <div class="kpi"><div class="klabel">连接数</div><div class="kval" id="ov-conns">—</div><div class="kfoot">内核活动连接</div></div>
+    <div class="kpi"><div class="klabel">延迟</div><div class="kval" id="ov-delay">—</div><div class="kfoot" id="ov-delay-foot">点击测速</div></div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">稳定性测速</h2>
+      <div class="row"><select id="ov-group" style="width:180px"></select>
+        <button class="primary" id="ov-test">开始测速</button></div>
+    </div>
+    <div id="ov-bars" class="bars" style="margin-top:16px"></div>
+    <div class="muted" id="ov-test-msg" style="margin-top:14px">串行 3 次探测，约 3 秒，避免并发触发风控。</div>
+  </div>
+
+  <div class="card">
+    <h2>快速入口</h2>
+    <div class="quick">
+      <button data-goto="groups">分组<span>选择与设置</span></button>
+      <button data-goto="routes">分流规则<span>域名 / 进程</span></button>
+      <button data-goto="apps">应用分流<span>实时出口</span></button>
+      <button data-goto="vpn">系统 VPN<span>状态与保活</span></button>
+    </div>
+  </div>
+</section>
+
+<section id="sec-groups" hidden>
   <div class="card">
     <div class="row">
       <select id="addsel" style="flex:1"></select>
@@ -2052,8 +2107,8 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
 </div>
 </div>
 <script>
-var STATUS=null, CTL={}, ROUTES=[], RT_TARGETS=[], SITE={}, NAV='groups';
-var TITLES = {groups:'分组', routes:'分流规则', sub:'订阅', site:'站点诊断', vpn:'系统 VPN', apps:'应用分流'};
+var STATUS=null, CTL={}, ROUTES=[], RT_TARGETS=[], SITE={}, NAV='overview';
+var TITLES = {overview:'概览', groups:'分组', routes:'分流规则', sub:'订阅', site:'站点诊断', vpn:'系统 VPN', apps:'应用分流'};
 var PROVIDERS=[];
 
 function loadProviders(){
@@ -2086,7 +2141,8 @@ document.querySelectorAll('[data-nav]').forEach(function(b){
     var pt = el('pagetitle'); if(pt) pt.textContent = TITLES[NAV] || '';
     if(location.hash !== '#' + NAV){ try{ history.replaceState(null,'','#'+NAV); }catch(e){} }
     document.querySelectorAll('[data-nav]').forEach(function(x){ x.classList.toggle('on', x===b); });
-    ['groups','routes','sub','site','vpn','apps'].forEach(function(n){ el('sec-'+n).hidden = (n!==NAV); });
+    ['overview','groups','routes','sub','site','vpn','apps'].forEach(function(n){ el('sec-'+n).hidden = (n!==NAV); });
+    if(NAV==='overview') loadOverview();
     if(NAV==='routes'){ loadRoutes(); loadTun(); }
     if(NAV==='site' && STATUS) fillSiteGroups(STATUS);
     if(NAV==='vpn') loadVpns();
@@ -2271,6 +2327,86 @@ if(el('proc-add')) el('proc-add').onclick = function(){
   });
 };
 
+function loadOverview(){
+  get('/api/overview').then(function(d){
+    if(!d.ok){ el('ov-ctl').textContent = '失败'; el('ov-ctl-foot').textContent = d.error || ''; return; }
+    var gs = d.groups || [];
+    el('ov-groups').innerHTML = gs.map(function(g){
+      return '<div style="margin-bottom:12px">'
+        + '<div class="muted" style="font-size:12px">'+g.label+'</div>'
+        + '<div class="big">'+(g.current || '—')+'</div>'
+        + '<div class="muted" style="font-size:12px">'
+        + (g.current_ms ? g.current_ms + ' ms' : '延迟未知') + ' · 上次 ' + (g.last_run || '—') + '</div></div>';
+    }).join('') || '<div class="muted">还没有纳管分组</div>';
+
+    el('ov-mode').textContent = '模式 ' + (d.mode || '—');
+    el('ov-tun').textContent = 'TUN ' + (d.tun && d.tun.enable ? '已开' : '已关');
+    el('ov-tun').className = 'badge ' + (d.tun && d.tun.enable ? 'ok' : '');
+    var tun = d.vpn && d.vpn.tunnel;
+    el('ov-vpn').textContent = tun ? ('VPN ' + tun.iface) : 'VPN 未连接';
+    el('ov-vpn').className = 'badge ' + (tun ? 'ok' : '');
+
+    var ctl = d.controller || {};
+    el('ov-ctl').textContent = (ctl.kind === 'unix') ? 'Clash Verge' : 'TCP';
+    el('ov-ctl-foot').textContent = (ctl.kind === 'unix') ? 'unix socket'
+      : ((ctl.host || '') + ':' + (ctl.port || ''));
+    el('ov-port').textContent = d.mixed_port || '—';
+    el('ov-conns').textContent = d.connections != null ? d.connections : '—';
+
+    var sel = el('ov-group');
+    var cur = sel.value;
+    sel.innerHTML = gs.map(function(g){
+      var q = String(g.id).replace(/"/g, '&quot;');
+      return '<option value="'+q+'">'+g.label+'</option>';
+    }).join('');
+    if(cur) sel.value = cur;
+  }).catch(function(){});
+}
+
+if(el('ov-test')) el('ov-test').onclick = function(){
+  var gid = el('ov-group').value;
+  if(!gid){ el('ov-test-msg').textContent = '没有可用分组'; return; }
+  el('ov-test').disabled = true;
+  el('ov-test-msg').textContent = '测速中…（串行 3 次）';
+  el('ov-bars').innerHTML = '';
+  get('/api/latency?id=' + encodeURIComponent(gid)).then(function(d){
+    el('ov-test').disabled = false;
+    if(!d.ok){ el('ov-test-msg').textContent = d.error || '测速失败'; return; }
+    var max = 1;
+    (d.samples || []).forEach(function(x){ if(x && x > max) max = x; });
+    el('ov-bars').innerHTML = (d.samples || []).map(function(x){
+      var h = Math.max(8, Math.round(((x || max) / max) * 56));
+      return '<div class="bar" style="height:' + h + 'px' + (x ? '' : ';background:#f0d9d7') + '"></div>';
+    }).join('');
+    el('ov-delay').textContent = d.avg ? (d.avg + ' ms') : '—';
+    el('ov-delay-foot').textContent = '抖动 ' + (d.jitter || 0) + ' ms · ' + d.ok_count + '/3 成功';
+    el('ov-test-msg').textContent = d.node + ' · 最小 ' + (d.min || '-') + ' / 平均 ' + (d.avg || '-') + ' / 最大 ' + (d.max || '-');
+  }).catch(function(){ el('ov-test').disabled = false; el('ov-test-msg').textContent = '请求失败'; });
+};
+
+document.addEventListener('click', function(e){
+  var t = e.target;
+  if(!t || !t.closest) return;
+  var b = t.closest('button[data-goto]');
+  if(b){
+    var nb = document.querySelector('[data-nav="' + b.dataset.goto + '"]');
+    if(nb) nb.click();
+  }
+});
+
+function checkUpdateSilently(){
+  var btn = el('updatebtn');
+  if(!btn) return;
+  get('/api/update/check').then(function(d){
+    if(d && d.ok && d.has_update){
+      btn.textContent = '更新 v' + d.latest;
+      btn.style.display = '';
+    } else {
+      btn.style.display = 'none';
+    }
+  }).catch(function(){ btn.style.display = 'none'; });
+}
+
 function loadTun(){
   get('/api/tun').then(function(d){
     var b = el('tun-badge');
@@ -2450,6 +2586,8 @@ document.addEventListener('click', function(e){
 
 loadProviders();
 loadRoutes();
+loadOverview();
+checkUpdateSilently();
 
 (function(){
   try {
@@ -2963,6 +3101,62 @@ class Handler(BaseHTTPRequestHandler):
                 tail = "（暂无日志）"
             page = PAGE.replace("<!--LOGTAIL-->", html.escape(tail or "（暂无日志）"))
             return self._send(200, page, "text/html; charset=utf-8")
+        if path == "/api/overview":
+            ctx = controller_ctx(eng.cfg)
+            try:
+                cfg = api(ctx, "GET", "/configs", timeout=10)
+                conns = api(ctx, "GET", "/connections", timeout=10)
+            except Exception as exc:
+                return self._send(200, json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+            tun = cfg.get("tun") or {}
+            groups = []
+            for gid, runner in eng.runners.items():
+                snap = runner.snapshot()
+                groups.append({"id": gid, "label": runner.cfg.get("label", gid),
+                               "role": runner.cfg.get("role", "general"),
+                               "current": snap.get("current"),
+                               "current_ms": snap.get("current_ms"),
+                               "last_run": snap.get("last_run")})
+            body = {
+                "ok": True,
+                "controller": eng.controller,
+                "mode": cfg.get("mode"),
+                "mixed_port": cfg.get("mixed-port") or cfg.get("port"),
+                "tun": {"enable": bool(tun.get("enable")), "stack": tun.get("stack") or ""},
+                "groups": groups,
+                "connections": len(conns.get("connections") or []),
+                "vpn": {"tunnel": _active_tunnel(), "clients": _running_vpn_clients()},
+                "version": VERSION,
+            }
+            return self._send(200, json.dumps(body, ensure_ascii=False))
+
+        if path == "/api/latency":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            gid = (qs.get("id") or [""])[0]
+            runner = eng.runners.get(gid)
+            if runner is None:
+                return self._send(404, json.dumps({"ok": False, "error": "分组不存在"}, ensure_ascii=False))
+            ctx = controller_ctx(eng.cfg)
+            snap = runner.snapshot()
+            node = snap.get("current")
+            if not node:
+                return self._send(200, json.dumps({"ok": False, "error": "当前没有节点"}, ensure_ascii=False))
+            url = runner.cfg.get("test_url")
+            samples = []
+            for i in range(3):
+                samples.append(probe_delay(ctx, node, url, int(runner.cfg.get("timeout_ms", 3000))))
+                if i < 2:
+                    time.sleep(0.9)
+            ok = [x for x in samples if x]
+            body = {"ok": True, "node": node, "group": runner.cfg.get("label", gid),
+                    "samples": samples,
+                    "min": min(ok) if ok else None,
+                    "max": max(ok) if ok else None,
+                    "avg": round(sum(ok) / len(ok)) if ok else None,
+                    "jitter": (max(ok) - min(ok)) if len(ok) > 1 else 0,
+                    "ok_count": len(ok)}
+            return self._send(200, json.dumps(body, ensure_ascii=False))
+
         if path == "/api/status":
             groups = []
             for gid, runner in eng.runners.items():
@@ -3045,11 +3239,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps(live_apps(), ensure_ascii=False))
         if path == "/api/tun":
             return self._send(200, json.dumps(tun_state(), ensure_ascii=False))
-        if path == "/api/update/apply":
-            res = apply_update(str(payload.get("url") or ""),
-                               str(payload.get("name") or ""),
-                               str(payload.get("mode") or "install"))
-            return self._send(200, json.dumps(res, ensure_ascii=False))
         if path == "/api/vpn":
             return self._send(200, json.dumps({
                 "ok": True, "vpns": list_system_vpns(), "platform": platform.system(),
@@ -3129,6 +3318,11 @@ class Handler(BaseHTTPRequestHandler):
             save_config(self.engine.cfg)
             refresh_region_state(self.engine.cfg)
             return self._send(200, json.dumps({"ok": True, "overrides": overrides}, ensure_ascii=False))
+        if path == "/api/update/apply":
+            res = apply_update(str(payload.get("url") or ""),
+                               str(payload.get("name") or ""),
+                               str(payload.get("mode") or "install"))
+            return self._send(200, json.dumps(res, ensure_ascii=False))
         if path == "/api/vpn":
             res = vpn_action(str(payload.get("name") or ""), str(payload.get("action") or ""))
             return self._send(200, json.dumps(res, ensure_ascii=False))

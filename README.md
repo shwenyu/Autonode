@@ -14,7 +14,7 @@
 ## 界面
 
 <p align="center">
-  <img src="docs/screenshots/groups.png" width="820" alt="分组">
+  <img src="docs/screenshots/overview.png" width="820" alt="概览">
 </p>
 
 浅色、卡片化、近乎无色的界面；只有关键状态（运行中 / TUN 开关 / 错误）带一点颜色。
