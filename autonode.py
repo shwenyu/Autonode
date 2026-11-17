@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -1633,6 +1633,19 @@ td{text-align:left;padding:12px 8px;border-bottom:1px solid var(--line-soft);ver
 tr:last-child td{border-bottom:0}
 tbody tr:hover td{background:#fbfcfd}
 
+/* 分组卡片：收起 / 切换按钮 */
+.iconbtn{width:26px;height:26px;padding:0;display:grid;place-items:center;border:0;
+  border-radius:8px;background:transparent;color:var(--text-3);flex:none}
+.iconbtn:hover{background:#f2f4f7;color:var(--text)}
+.iconbtn svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.8;
+  stroke-linecap:round;stroke-linejoin:round;transition:transform .22s ease}
+.gcard.collapsed .iconbtn svg{transform:rotate(-90deg)}
+.gcard.collapsed .gbody{display:none}
+.gsum{font-size:12.5px;color:var(--text-3);margin-left:2px}
+.gcard:not(.collapsed) .gsum{display:none}
+.gcard td button{padding:5px 10px;font-size:12.5px;white-space:nowrap}
+.gcard td:last-child{width:78px}
+
 /* 其他 */
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
@@ -2309,11 +2322,16 @@ document.addEventListener('keydown', function(e){ if(e.key==='Escape') closeLog(
 function groupCard(g){
   var c = g.config, id = g.id;
   return '<div class="card gcard" data-gid="'+id+'">'
-    + '<div class="ghd"><div><span class="gname">'+g.label+'</span> <span class="badge" data-role="state">-</span></div>'
+    + '<div class="ghd"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
+    + '<button class="iconbtn" data-act="collapse" title="收起/展开">'
+    + '<svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>'
+    + '<span class="gname">'+g.label+'</span> <span class="badge" data-role="state">-</span>'
+    + ' <span class="gsum" data-role="summary"></span></div>'
     + '<div class="row"><button data-act="run">立即检测</button>'
     + '<button data-act="toggle" class="ghost">暂停</button>'
     + '<button data-act="remove" class="ghost">移除</button></div></div>'
-    + '<div class="grid" style="margin-top:12px">'
+    + '<div class="gbody">'
+    + '<div class="grid" style="margin-top:14px">'
     + '<div><div class="muted">当前节点</div><div class="big mono" data-role="current">-</div>'
     + '<div class="muted" data-role="meta">-</div><div class="muted" data-role="last">-</div></div>'
     + '<div><div class="muted">本轮结果</div><div data-role="action" style="margin:6px 0">-</div>'
@@ -2335,7 +2353,24 @@ function groupCard(g){
     + '</div></div>'
     + '<label style="margin-top:12px">地区偏好</label><div class="chips" data-role="regions"></div>'
     + '<div class="row" style="margin-top:12px"><button class="primary" data-act="save">保存设置</button><button class="ghost" data-act="regions">未识别地区…</button>'
-    + '<span class="muted" data-role="save"></span></div></details></div>';
+    + '<span class="muted" data-role="save"></span></div></details></div></div>';
+}
+
+var COLLAPSE_KEY = 'autonode.collapsed';
+
+function collapsedMap(){
+  try { return JSON.parse(localStorage.getItem(COLLAPSE_KEY) || '{}') || {}; }
+  catch(e){ return {}; }
+}
+
+function saveCollapsed(map){
+  try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify(map)); } catch(e){}
+}
+
+function applyCollapse(card, gid){
+  if(!card) return;
+  var map = collapsedMap();
+  card.classList.toggle('collapsed', !!map[gid]);
 }
 
 function fillGroupForm(card, g){
@@ -2396,7 +2431,11 @@ function renderGroups(s){
   if(box.dataset.sig !== s.groups.map(function(g){return g.id+g.label;}).join('|')){
     box.innerHTML = html;
     box.dataset.sig = s.groups.map(function(g){return g.id+g.label;}).join('|');
-    s.groups.forEach(function(g){ fillGroupForm(box.querySelector('[data-gid="'+g.id+'"]'), g); });
+    s.groups.forEach(function(g){
+      var card = box.querySelector('[data-gid="'+g.id+'"]');
+      fillGroupForm(card, g);
+      applyCollapse(card, g.id);
+    });
   }
 }
 
@@ -2410,6 +2449,8 @@ function updateGroups(s){
     card.querySelector('[data-role="current"]').textContent = st.current || '未知';
     card.querySelector('[data-role="meta"]').textContent = (st.current_ms ? st.current_ms+' ms' : '延迟未知');
     var hold = st.hold_remaining > 0 ? ' · 手动锁定 '+Math.ceil(st.hold_remaining/60)+' 分钟' : '';
+    var sum = card.querySelector('[data-role="summary"]');
+    if(sum) sum.textContent = (st.current || '未知') + (st.current_ms ? ' · ' + st.current_ms + ' ms' : '');
     card.querySelector('[data-role="last"]').textContent = '上次运行：'+(st.last_run||'-')+(st.running?' · 测速中…':'')+hold;
     var map = {switch:['已切换','ok'],keep:['保持不变','ok'],skip:['已跳过','warn'],error:['出错','bad'],manual:['手动','ok'],'dry-run':['演练','warn'],none:['等待','']};
     var m = map[d.action]||['-',''];
@@ -2439,6 +2480,12 @@ document.addEventListener('click', function(e){
     if(confirm('不再自动管理「'+g.label+'」？')){ post('/api/groups/remove',{id:gid}).then(function(){ refresh(); }); }
   }
   else if(act==='switch'){ post('/api/switch',{id:gid,name:btn.dataset.node}).then(function(){ setTimeout(refresh,600); }); }
+  else if(act==='collapse'){
+    var map = collapsedMap();
+    map[gid] = !map[gid];
+    saveCollapsed(map);
+    card.classList.toggle('collapsed', !!map[gid]);
+  }
   else if(act==='regions'){ openRegionModal(); }
   else if(act==='save'){
     var regions = Array.from(card.querySelectorAll('[data-role="regions"] input:checked')).map(function(i){return i.value;});
