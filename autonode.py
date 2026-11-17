@@ -585,6 +585,70 @@ def _prefs_vpn_services():
     return out
 
 
+def controller_alive(cfg):
+    """真实探测控制器是否可用（避免使用启动时缓存的过期状态）。"""
+    try:
+        ctx = controller_ctx(cfg or {})
+    except Exception:
+        return False
+    if not (ctx.get("unix") or ctx.get("host")):
+        return False
+    try:
+        api(ctx, "GET", "/version", timeout=3)
+        return True
+    except Exception:
+        return False
+
+
+def _active_vpn_name():
+    """正在使用的系统 VPN 名称（由隧道 + 运行中的客户端推断）。"""
+    if not _active_tunnel():
+        return ""
+    clients = _running_vpn_clients()
+    if not clients:
+        return "系统 VPN"
+    return clients[0]
+
+
+def lsof_apps():
+    """无 Clash 时用系统连接表粗略统计每个应用的连接。"""
+    try:
+        out = subprocess.run(["lsof", "-nP", "-i", "-iTCP"], capture_output=True,
+                             text=True, timeout=12).stdout
+    except Exception:
+        return []
+    agg = {}
+    for line in out.splitlines()[1:]:
+        if "ESTABLISHED" not in line:
+            continue
+        parts = line.split()
+        if len(parts) < 9:
+            continue
+        name = parts[0].replace("\\x20", " ")
+        item = agg.setdefault(name, {"name": name, "conns": 0, "hosts": set()})
+        item["conns"] += 1
+        endpoint = parts[8]
+        if "->" in endpoint:
+            host = endpoint.split("->")[-1].rsplit(":", 1)[0]
+            if host:
+                item["hosts"].add(host)
+    apps = [{"name": v["name"], "conns": v["conns"], "download": 0, "upload": 0,
+             "rules": [], "outbound": [], "hosts": sorted(v["hosts"])[:2]}
+            for v in agg.values()]
+    apps.sort(key=lambda a: -a["conns"])
+    return apps
+
+
+def _default_gateway():
+    try:
+        out = subprocess.run(["route", "-n", "get", "default"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return ""
+    m = re.search(r"gateway:\s*(\S+)", out)
+    return m.group(1) if m else ""
+
+
 def _active_tunnel():
     """当前默认路由是否走的 utun 隧道（系统 VPN / 其它代理的 TUN）。"""
     try:
@@ -1659,7 +1723,14 @@ a{color:inherit}
 .bmeta{font-size:11px;color:var(--text-3);margin-top:1px}
 
 /* 导航分组 */
-.navwrap{display:flex;flex-direction:column;gap:14px}
+.navwrap{display:flex;flex-direction:column;gap:10px}
+.navtop{display:flex;align-items:center;gap:9px;width:100%;justify-content:flex-start;
+  padding:10px 10px;border:0;border-radius:8px;background:transparent;color:var(--text-2);
+  font-size:13px;font-weight:450;cursor:pointer;transition:background .18s,color .18s}
+.navtop svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.6;
+  stroke-linecap:round;stroke-linejoin:round;opacity:.85}
+.navtop:hover{background:#fafbfc;color:var(--text)}
+.navtop.on{background:#f3f4f6;color:var(--text);font-weight:600}
 .navgroup{display:flex;flex-direction:column}
 .navhead{display:flex;align-items:center;justify-content:space-between;width:100%;
   padding:6px 10px;border:0;background:transparent;color:var(--text-3);
@@ -1784,6 +1855,10 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
 .quick button:hover{background:#fafbfc;border-color:#e3e6ea}
 @media(max-width:900px){.quick{grid-template-columns:repeat(2,minmax(0,1fr))}}
 
+.manual h3{font-size:12.5px;font-weight:600;margin:14px 0 4px;color:var(--text)}
+.manual p{font-size:12.5px;color:var(--text-2);margin:0 0 2px;line-height:1.6}
+.manual h3:first-child{margin-top:2px}
+
 /* 弹窗 */
 .modal{position:fixed;inset:0;background:rgba(17,17,17,.28);
   backdrop-filter:saturate(120%) blur(6px);-webkit-backdrop-filter:saturate(120%) blur(6px);
@@ -1822,14 +1897,15 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
   </div>
 
   <div class="navwrap">
+    <button class="navtop" data-nav="overview">
+      <svg viewBox="0 0 24 24"><path d="M4 11.5 12 4l8 7.5"/><path d="M6.5 10v9h11v-9"/></svg>
+      概览</button>
+
     <div class="navgroup" data-group="nodes">
       <button class="navhead" data-toggle="nodes">节点
         <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
       <div class="navsub">
-        <button data-nav="overview" class="on">
-          <svg viewBox="0 0 24 24"><path d="M4 11.5 12 4l8 7.5"/><path d="M6.5 10v9h11v-9"/></svg>
-          概览</button>
-        <button data-nav="groups">
+        <button data-nav="groups" class="on">
           <svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="7" rx="2"/><rect x="3.5" y="13.5" width="7" height="7" rx="2"/><rect x="13.5" y="13.5" width="7" height="7" rx="2"/></svg>
           分组</button>
         <button data-nav="routes">
@@ -1871,6 +1947,8 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
     <h1 id="pagetitle">概览</h1>
     <div class="row">
       <button id="updatebtn" class="primary" style="display:none">更新</button>
+      <button id="refreshbtn" class="ghost">刷新</button>
+      <button id="helpbtn" class="ghost">帮助</button>
       <button id="logbtn" class="ghost">日志</button>
       <button id="restartbtn" class="ghost">重启服务</button>
       <button id="quitbtn" class="ghost">退出</button>
@@ -1884,6 +1962,7 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
       <div>
         <div class="muted" style="font-size:12px">当前出口</div>
         <div id="ov-groups" style="margin-top:8px"></div>
+        <div class="muted" id="ov-vpnline" style="margin-top:10px;font-size:12px"></div>
       </div>
       <div class="row" style="gap:6px">
         <span id="ov-mode" class="badge">模式 —</span>
@@ -1894,7 +1973,7 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
   </div>
 
   <div class="kpis">
-    <div class="kpi"><div class="klabel">控制器</div><div class="kval" id="ov-ctl">—</div><div class="kfoot" id="ov-ctl-foot">—</div></div>
+    <div class="kpi"><div class="klabel">Clash 客户端</div><div class="kval" id="ov-ctl">—</div><div class="kfoot" id="ov-ctl-foot">—</div></div>
     <div class="kpi"><div class="klabel">混合端口</div><div class="kval" id="ov-port">—</div><div class="kfoot">本地代理入口</div></div>
     <div class="kpi"><div class="klabel">连接数</div><div class="kval" id="ov-conns">—</div><div class="kfoot">内核活动连接</div></div>
     <div class="kpi"><div class="klabel">延迟</div><div class="kval" id="ov-delay">—</div><div class="kfoot" id="ov-delay-foot">点击测速</div></div>
@@ -1922,6 +2001,11 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
 </section>
 
 <section id="sec-groups" hidden>
+  <div class="card" id="no-clash" hidden>
+    <div class="big">未检测到 Clash 控制器</div>
+    <div class="muted" style="margin-top:6px">当前可能只在使用系统 VPN（TUN）。分组选优需要 Clash Verge 等客户端在运行；
+    <a href="#vpn">到「VPN」页查看系统隧道状态</a>。</div>
+  </div>
   <div class="card">
     <div class="row">
       <select id="addsel" style="flex:1"></select>
@@ -1929,7 +2013,7 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
       <button id="newgroupbtn" class="ghost">新建分组</button>
       <button id="rescanbtn" class="ghost">扫描新分组</button>
     </div>
-    <div class="muted" id="addmsg" style="margin-top:8px">从客户端已有分组里挑一个纳管；不在这里的分组不会被自动切换。</div>
+    <div class="muted" id="addmsg" style="margin-top:6px"></div>
   </div>
   <div id="gcards"></div>
 </section>
@@ -1946,11 +2030,9 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
       <button id="tun-add">生成进程规则</button>
       <span class="muted" id="tun-msg"></span>
     </div>
-    <div class="muted" style="margin-top:8px">TUN 关闭时进程规则不生效。开启 TUN 后，只有该进程的连接走所选分组。</div>
   </div>
   <div class="card">
     <h2>分流规则（全局）</h2>
-    <div class="muted" style="margin-bottom:8px">让指定网站走直连或某个分组。保存后点「应用」会重启内核（仅 Clash Verge 支持）。</div>
     <table><thead><tr><th style="width:150px">匹配方式</th><th>值</th><th style="width:190px">走向</th><th style="width:52px"></th></tr></thead>
     <tbody id="rt"></tbody></table>
     <div class="row" style="margin-top:10px">
@@ -1974,7 +2056,6 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
 <section id="sec-sub" hidden>
   <div class="card">
     <h2>订阅导入</h2>
-    <div class="muted" style="margin-bottom:8px">粘贴订阅链接，先校验能否拉取，再交给客户端导入。挂载（系统代理/TUN）由客户端完成。</div>
     <div class="row">
       <input id="sub-url" placeholder="https://example.com/api/v1/client/subscribe?token=..." style="flex:1">
       <button id="sub-check">校验</button>
@@ -1988,7 +2069,6 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
 <section id="sec-site" hidden>
   <div class="card">
     <h2>站点诊断</h2>
-    <div class="muted" style="margin-bottom:8px">打不开某个网站时，测一下哪些节点能打开，再一键切换。只在你点击时运行。</div>
     <div class="row">
       <select id="site-group" style="width:220px"></select>
       <input id="site-url" placeholder="https://linkinghub.elsevier.com/" style="flex:1">
@@ -2014,13 +2094,12 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
     <div class="muted" id="apps-note" style="margin-top:8px">-</div>
     <table style="margin-top:10px">
       <thead><tr><th>应用</th><th style="width:60px">连接</th><th style="width:130px">流量</th>
-      <th>命中规则</th><th style="width:150px">当前出口</th><th style="width:86px"></th></tr></thead>
+      <th id="apps-head">命中规则</th><th style="width:150px">当前出口</th><th style="width:86px"></th><th style="width:86px"></th></tr></thead>
       <tbody id="apps-body"></tbody>
     </table>
   </div>
   <div class="card">
     <h2>进程规则</h2>
-    <div class="muted" style="margin-bottom:8px">按进程名匹配，优先级按规则顺序。仅在 TUN 开启时对所有应用生效；未开 TUN 时只影响走系统代理的应用。</div>
     <table><thead><tr><th>进程</th><th style="width:200px">走向</th><th style="width:60px"></th></tr></thead>
     <tbody id="proc-body"></tbody></table>
     <div class="row" style="margin-top:10px">
@@ -2036,7 +2115,6 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
 <section id="sec-vpn" hidden>
   <div class="card">
     <h2>系统 VPN</h2>
-    <div class="muted">管理 macOS 里已配置的 VPN（L2TP / IKEv2 / IPSec / 第三方客户端）。Clash 内核不支持这些协议，所以它们不会出现在节点列表里，只能在这里连接/断开。勾选「保持」后每 60 秒检查一次，断线自动重连。</div>
     <div class="row" style="margin-top:10px">
       <button id="vpn-new" class="primary">新建 VPN</button>
       <button id="vpn-refresh">刷新</button>
@@ -2050,6 +2128,21 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
     <div class="muted" id="vpn-msg" style="margin-top:8px"></div>
   </div>
 </section>
+
+<div class="modal" id="helpmodal" hidden>
+  <div class="box">
+    <div class="row" style="justify-content:space-between"><b>使用手册</b><button id="help-close" class="ghost">关闭</button></div>
+    <div class="manual">
+      <h3>概览</h3><p>显示当前出口、Clash 客户端状态与系统 VPN 隧道，可做 3 次串行延迟测量。没有 Clash 时自动切到「系统 VPN 模式」。</p>
+      <h3>分组</h3><p>从 Clash 客户端已有的分组里挑一个纳管。AI 通道角色的分组采用粘滞策略：验证通过就不换节点。</p>
+      <h3>分流规则</h3><p>按域名 / IP 段 / 进程名决定走向。保存后点「保存并应用」会重启内核（仅 Clash Verge 支持）。TUN 关闭时进程规则不生效。</p>
+      <h3>订阅</h3><p>粘贴订阅链接，先校验可访问性，再交给客户端导入。</p>
+      <h3>站点诊断</h3><p>只在你点击时运行：串行测试哪些节点能打开目标站点，避免并发触发风控。</p>
+      <h3>VPN</h3><p>系统配置型 VPN 可直接连接/断开，并可勾选「保持」每 60 秒检查、断线重连。Shadowrocket / aTrust 这类 Network Extension 应用只能识别状态并打开客户端，无法由本工具开关。</p>
+      <h3>应用</h3><p>有 Clash 时按进程显示实时连接与出口；无 Clash 时退化为系统连接统计（只有连接数，没有流量字节）。</p>
+    </div>
+  </div>
+</div>
 
 <div class="modal" id="updatemodal" hidden>
   <div class="box">
@@ -2236,13 +2329,16 @@ function loadApps(){
   get('/api/apps').then(function(d){
     var badge = el('apps-badge');
     if(!d.ok){ if(badge){ badge.textContent='读取失败'; badge.className='badge bad'; } return; }
+    var sysMode = (d.mode === 'system');
     if(badge){
-      badge.textContent = d.tun ? 'TUN 已开启' : 'TUN 已关闭';
-      badge.className = 'badge ' + (d.tun ? 'ok' : 'warn');
+      badge.textContent = sysMode ? '系统统计' : (d.tun ? 'TUN 已开启' : 'TUN 已关闭');
+      badge.className = 'badge ' + (sysMode ? '' : (d.tun ? 'ok' : 'warn'));
     }
-    el('apps-note').textContent = '进程识别模式 ' + (d.find_process_mode || '-')
-      + (d.tun ? ' · 所有应用流量均经过内核' : ' · TUN 关闭时仅走系统代理的应用可见')
-      + ' · 共 ' + d.count + ' 个应用';
+    var head = el('apps-head');
+    if(head) head.textContent = sysMode ? '连接对象' : '命中规则';
+    el('apps-note').textContent = sysMode
+      ? (d.notice || '未连接 Clash，显示系统连接统计') + ' · 共 ' + d.count + ' 个应用'
+      : ('进程识别 ' + (d.find_process_mode || '-') + ' · 共 ' + d.count + ' 个应用');
 
     var conns = 0, dl = 0;
     (d.apps || []).forEach(function(a){ conns += a.conns; dl += a.download; });
@@ -2250,8 +2346,13 @@ function loadApps(){
     if(el('k-conns')) el('k-conns').textContent = String(conns);
     if(el('k-dl')) el('k-dl').textContent = fmtBytes(dl);
     if(el('k-tun')){
-      el('k-tun').textContent = d.tun ? '已开启' : '已关闭';
-      el('k-tun').style.color = d.tun ? 'var(--ok)' : 'var(--warn)';
+      if(sysMode){
+        el('k-tun').textContent = '—';
+        el('k-tun').style.color = 'var(--text-3)';
+      } else {
+        el('k-tun').textContent = d.tun ? '已开启' : '已关闭';
+        el('k-tun').style.color = d.tun ? 'var(--ok)' : 'var(--warn)';
+      }
     }
     if(el('k-tun-foot')) el('k-tun-foot').textContent = '进程识别 ' + (d.find_process_mode || '-');
 
@@ -2265,8 +2366,9 @@ function loadApps(){
       return '<tr><td><div class="mono">'+a.name+'</div>'
         + '<div class="muted" style="font-size:11px">'+((a.hosts||[])[0]||'')+'</div></td>'
         + '<td>'+a.conns+'</td><td>'+fmtBytes(a.download)+' ↓</td>'
-        + '<td class="muted" style="font-size:12px">'+((a.rules||[])[0]||'-')+'</td>'
-        + '<td><span class="badge '+cls+'" style="white-space:nowrap;color:'+outColor+'">'+out+'</span></td>'
+        + '<td class="muted" style="font-size:12px">'+(sysMode ? ((a.hosts||[]).join(' · ')||'-') : ((a.rules||[])[0]||'-'))+'</td>'
+        + '<td>' + (sysMode ? '<span class="muted">—</span>'
+            : '<span class="badge '+cls+'" style="white-space:nowrap;color:'+outColor+'">'+out+'</span>') + '</td>'
         + '<td><button class="ghost" data-apprule="'+q+'" style="white-space:nowrap">＋规则</button></td></tr>';
     }).join('') || '<tr><td colspan="6" class="muted">当前没有带进程信息的连接</td></tr>';
 
@@ -2329,47 +2431,76 @@ if(el('proc-add')) el('proc-add').onclick = function(){
 
 function loadOverview(){
   get('/api/overview').then(function(d){
-    if(!d.ok){ el('ov-ctl').textContent = '失败'; el('ov-ctl-foot').textContent = d.error || ''; return; }
-    var gs = d.groups || [];
-    el('ov-groups').innerHTML = gs.map(function(g){
-      return '<div style="margin-bottom:12px">'
-        + '<div class="muted" style="font-size:12px">'+g.label+'</div>'
-        + '<div class="big">'+(g.current || '—')+'</div>'
-        + '<div class="muted" style="font-size:12px">'
-        + (g.current_ms ? g.current_ms + ' ms' : '延迟未知') + ' · 上次 ' + (g.last_run || '—') + '</div></div>';
-    }).join('') || '<div class="muted">还没有纳管分组</div>';
+    var clash = !!d.clash;
+    window.__ovClash = clash;
 
-    el('ov-mode').textContent = '模式 ' + (d.mode || '—');
-    el('ov-tun').textContent = 'TUN ' + (d.tun && d.tun.enable ? '已开' : '已关');
-    el('ov-tun').className = 'badge ' + (d.tun && d.tun.enable ? 'ok' : '');
-    var tun = d.vpn && d.vpn.tunnel;
-    el('ov-vpn').textContent = tun ? ('VPN ' + tun.iface) : 'VPN 未连接';
-    el('ov-vpn').className = 'badge ' + (tun ? 'ok' : '');
+    if(el('no-clash')) el('no-clash').hidden = clash;
 
-    var ctl = d.controller || {};
-    el('ov-ctl').textContent = (ctl.kind === 'unix') ? 'Clash Verge' : 'TCP';
-    el('ov-ctl-foot').textContent = (ctl.kind === 'unix') ? 'unix socket'
-      : ((ctl.host || '') + ':' + (ctl.port || ''));
-    el('ov-port').textContent = d.mixed_port || '—';
-    el('ov-conns').textContent = d.connections != null ? d.connections : '—';
+    if(clash){
+      var gs = d.groups || [];
+      el('ov-groups').innerHTML = gs.map(function(g){
+        return '<div style="margin-bottom:12px">'
+          + '<div class="muted" style="font-size:12px">'+g.label+'</div>'
+          + '<div class="big">'+(g.current || '—')+'</div>'
+          + '<div class="muted" style="font-size:12px">'
+          + (g.current_ms ? g.current_ms + ' ms' : '延迟未知') + ' · 上次 ' + (g.last_run || '—') + '</div></div>';
+      }).join('') || '<div class="muted">还没有纳管分组</div>';
+    } else {
+      var vname = (d.vpn && d.vpn.name) || '系统 VPN';
+      el('ov-groups').innerHTML = '<div class="big">' + vname + '</div>'
+        + '<div class="muted" style="margin-top:6px">系统 VPN 模式</div>';
+    }
 
-    var sel = el('ov-group');
-    var cur = sel.value;
-    sel.innerHTML = gs.map(function(g){
-      var q = String(g.id).replace(/"/g, '&quot;');
-      return '<option value="'+q+'">'+g.label+'</option>';
-    }).join('');
-    if(cur) sel.value = cur;
+    el('ov-mode').textContent = clash ? ('模式 ' + (d.mode || '—')) : '无 Clash';
+    el('ov-tun').textContent = clash ? ('TUN ' + (d.tun && d.tun.enable ? '已开' : '已关')) : 'TUN —';
+    el('ov-tun').className = 'badge ' + (clash && d.tun && d.tun.enable ? 'ok' : '');
+    var tunnel = d.vpn && d.vpn.tunnel;
+    el('ov-vpn').textContent = tunnel ? ('VPN ' + tunnel.iface) : 'VPN 未连接';
+    el('ov-vpn').className = 'badge ' + (tunnel ? 'ok' : '');
+
+    var vline = [];
+    if(tunnel) vline.push(tunnel.iface + (tunnel.ip ? ' · ' + tunnel.ip : ''));
+    if(d.vpn && (d.vpn.clients || []).length) vline.push('客户端：' + d.vpn.clients.join('、'));
+    if(d.network && d.network.gateway) vline.push('网关 ' + d.network.gateway);
+    el('ov-vpnline').textContent = vline.join(' · ');
+
+    if(clash){
+      var ctl = d.controller || {};
+      el('ov-ctl').textContent = (ctl.kind === 'unix') ? 'Clash Verge' : 'TCP';
+      el('ov-ctl-foot').textContent = (ctl.kind === 'unix') ? 'unix socket'
+        : ((ctl.host || '') + ':' + (ctl.port || ''));
+      el('ov-port').textContent = d.mixed_port || '—';
+      el('ov-conns').textContent = d.connections != null ? d.connections : '—';
+      var sel = el('ov-group');
+      var cur = sel.value;
+      sel.innerHTML = (d.groups || []).map(function(g){
+        var q = String(g.id).replace(/"/g, '&quot;');
+        return '<option value="'+q+'">'+g.label+'</option>';
+      }).join('');
+      if(cur) sel.value = cur;
+      sel.disabled = false;
+    } else {
+      el('ov-ctl').textContent = '无';
+      el('ov-ctl-foot').textContent = '未发现控制器';
+      el('ov-port').textContent = '—';
+      el('ov-conns').textContent = '—';
+      var sel2 = el('ov-group');
+      sel2.innerHTML = '<option value="">系统 VPN（直连测量）</option>';
+      sel2.disabled = true;
+    }
   }).catch(function(){});
 }
 
 if(el('ov-test')) el('ov-test').onclick = function(){
+  var clash = !!window.__ovClash;
   var gid = el('ov-group').value;
-  if(!gid){ el('ov-test-msg').textContent = '没有可用分组'; return; }
+  if(clash && !gid){ el('ov-test-msg').textContent = '没有可用分组'; return; }
   el('ov-test').disabled = true;
   el('ov-test-msg').textContent = '测速中…（串行 3 次）';
   el('ov-bars').innerHTML = '';
-  get('/api/latency?id=' + encodeURIComponent(gid)).then(function(d){
+
+  var url = clash ? ('/api/latency?id=' + encodeURIComponent(gid)) : '/api/net-latency';
+  get(url).then(function(d){
     el('ov-test').disabled = false;
     if(!d.ok){ el('ov-test-msg').textContent = d.error || '测速失败'; return; }
     var max = 1;
@@ -2380,7 +2511,8 @@ if(el('ov-test')) el('ov-test').onclick = function(){
     }).join('');
     el('ov-delay').textContent = d.avg ? (d.avg + ' ms') : '—';
     el('ov-delay-foot').textContent = '抖动 ' + (d.jitter || 0) + ' ms · ' + d.ok_count + '/3 成功';
-    el('ov-test-msg').textContent = d.node + ' · 最小 ' + (d.min || '-') + ' / 平均 ' + (d.avg || '-') + ' / 最大 ' + (d.max || '-');
+    el('ov-test-msg').textContent = (clash ? d.node : '系统 VPN 直连') + ' · 最小 ' + (d.min || '-')
+      + ' / 平均 ' + (d.avg || '-') + ' / 最大 ' + (d.max || '-');
   }).catch(function(){ el('ov-test').disabled = false; el('ov-test-msg').textContent = '请求失败'; });
 };
 
@@ -2456,6 +2588,19 @@ function openUpdate(){
 }
 
 if(el('updatebtn')) el('updatebtn').onclick = openUpdate;
+
+if(el('refreshbtn')) el('refreshbtn').onclick = function(){
+  refresh();
+  if(NAV === 'overview') loadOverview();
+  else if(NAV === 'apps'){ loadRoutes(); loadApps(); }
+  else if(NAV === 'vpn') loadVpns();
+  else if(NAV === 'routes'){ loadRoutes(); loadTun(); }
+};
+if(el('helpbtn')) el('helpbtn').onclick = function(){ el('helpmodal').hidden = false; };
+if(el('help-close')) el('help-close').onclick = function(){ el('helpmodal').hidden = true; };
+if(el('helpmodal')) el('helpmodal').onclick = function(e){
+  if(e.target === el('helpmodal')) el('helpmodal').hidden = true;
+};
 if(el('up-close')) el('up-close').onclick = function(){ el('updatemodal').hidden = true; };
 if(el('updatemodal')) el('updatemodal').onclick = function(e){
   if(e.target === el('updatemodal')) el('updatemodal').hidden = true;
@@ -3038,14 +3183,23 @@ function refresh(){
     failCount = 0;
     STATUS = s;
     CTL = s.controller || {};
-    el('ctl').textContent = CTL.kind==='unix' ? 'Clash Verge (unix socket)'
-      : (CTL.kind==='tcp' ? ('控制器 '+CTL.target) : '未检测到客户端');
+    if(!CTL || !CTL.kind){
+      el('ctl').textContent = '未检测到 Clash 客户端';
+      el('aistat').textContent = '';
+    } else {
+      el('ctl').textContent = CTL.kind==='unix' ? 'Clash Verge (unix socket)'
+        : ('控制器 ' + CTL.target);
+    }
     setState('运行中', 'ok');
     if(el('ver')) el('ver').textContent = 'v' + (s.version || '');
     el('sub-import').textContent = (CTL.kind==='unix')?'在 Verge 中导入':'复制订阅链接';
     var ai = (s.groups||[]).filter(function(g){ return (g.config.role||'') === 'ai'; })[0];
-    el('aistat').textContent = ai ? ('AI 通道：'+(ai.status.current||'-')+' · '+
-      (ai.status.current_ms? ai.status.current_ms+' ms':'未测')) : '未配置 AI 通道';
+    if(CTL && CTL.kind){
+      el('aistat').textContent = ai ? ('AI 通道：'+(ai.status.current||'-')+' · '+
+        (ai.status.current_ms? ai.status.current_ms+' ms':'未测')) : '未配置 AI 通道';
+    } else {
+      el('aistat').textContent = '';
+    }
     renderGroups(s);
     updateGroups(s);
     if(NAV==='site') fillSiteGroups(s);
@@ -3102,32 +3256,59 @@ class Handler(BaseHTTPRequestHandler):
             page = PAGE.replace("<!--LOGTAIL-->", html.escape(tail or "（暂无日志）"))
             return self._send(200, page, "text/html; charset=utf-8")
         if path == "/api/overview":
+            vpn_info = {"tunnel": _active_tunnel(), "clients": _running_vpn_clients(),
+                        "name": _active_vpn_name()}
+            body = {"ok": True, "clash": False, "vpn": vpn_info, "version": VERSION,
+                    "controller": eng.controller, "groups": [],
+                    "network": {"gateway": _default_gateway()}}
+            alive = controller_alive(eng.cfg)
             ctx = controller_ctx(eng.cfg)
             try:
-                cfg = api(ctx, "GET", "/configs", timeout=10)
-                conns = api(ctx, "GET", "/connections", timeout=10)
+                if not alive:
+                    raise RuntimeError("controller unreachable")
+                cfg = api(ctx, "GET", "/configs", timeout=8)
+                conns = api(ctx, "GET", "/connections", timeout=8)
+                tun = cfg.get("tun") or {}
+                groups = []
+                for gid, runner in eng.runners.items():
+                    snap = runner.snapshot()
+                    groups.append({"id": gid, "label": runner.cfg.get("label", gid),
+                                   "role": runner.cfg.get("role", "general"),
+                                   "current": snap.get("current"),
+                                   "current_ms": snap.get("current_ms"),
+                                   "last_run": snap.get("last_run")})
+                body.update({
+                    "clash": True, "mode": cfg.get("mode"),
+                    "mixed_port": cfg.get("mixed-port") or cfg.get("port"),
+                    "tun": {"enable": bool(tun.get("enable")), "stack": tun.get("stack") or ""},
+                    "connections": len(conns.get("connections") or []),
+                    "groups": groups,
+                })
             except Exception as exc:
-                return self._send(200, json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
-            tun = cfg.get("tun") or {}
-            groups = []
-            for gid, runner in eng.runners.items():
-                snap = runner.snapshot()
-                groups.append({"id": gid, "label": runner.cfg.get("label", gid),
-                               "role": runner.cfg.get("role", "general"),
-                               "current": snap.get("current"),
-                               "current_ms": snap.get("current_ms"),
-                               "last_run": snap.get("last_run")})
-            body = {
-                "ok": True,
-                "controller": eng.controller,
-                "mode": cfg.get("mode"),
-                "mixed_port": cfg.get("mixed-port") or cfg.get("port"),
-                "tun": {"enable": bool(tun.get("enable")), "stack": tun.get("stack") or ""},
-                "groups": groups,
-                "connections": len(conns.get("connections") or []),
-                "vpn": {"tunnel": _active_tunnel(), "clients": _running_vpn_clients()},
-                "version": VERSION,
-            }
+                body["error"] = str(exc)
+            return self._send(200, json.dumps(body, ensure_ascii=False))
+
+        if path == "/api/net-latency":
+            samples = []
+            for i in range(3):
+                t0 = time.time()
+                try:
+                    req = urllib.request.Request("https://www.gstatic.com/generate_204",
+                                                 headers={"User-Agent": "Autonode/" + VERSION})
+                    with urllib.request.urlopen(req, timeout=6) as resp:
+                        resp.read(1)
+                    samples.append(int((time.time() - t0) * 1000))
+                except Exception:
+                    samples.append(None)
+                if i < 2:
+                    time.sleep(0.6)
+            ok = [x for x in samples if x]
+            body = {"ok": True, "samples": samples,
+                    "min": min(ok) if ok else None,
+                    "max": max(ok) if ok else None,
+                    "avg": round(sum(ok) / len(ok)) if ok else None,
+                    "jitter": (max(ok) - min(ok)) if len(ok) > 1 else 0,
+                    "ok_count": len(ok)}
             return self._send(200, json.dumps(body, ensure_ascii=False))
 
         if path == "/api/latency":
@@ -3165,6 +3346,10 @@ class Handler(BaseHTTPRequestHandler):
                 snap["label"] = runner.cfg.get("label", gid)
                 groups.append({"id": gid, "label": runner.cfg.get("label", gid),
                                "status": snap, "config": runner.cfg})
+            ctl = dict(eng.controller or {})
+            if not controller_alive(eng.cfg):
+                ctl = {}
+            eng.controller = ctl
             body = {"enabled": eng.cfg["enabled"], "port": eng.cfg["port"],
                     "version": VERSION,
                     "controller": eng.controller,
@@ -3236,7 +3421,15 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/update/check":
             return self._send(200, json.dumps(check_update(), ensure_ascii=False))
         if path == "/api/apps":
-            return self._send(200, json.dumps(live_apps(), ensure_ascii=False))
+            data = live_apps()
+            if not data.get("ok"):
+                apps = lsof_apps()
+                data = {"ok": True, "apps": apps, "count": len(apps), "mode": "system",
+                        "tun": False, "find_process_mode": "",
+                        "notice": "未连接 Clash，显示系统连接统计（不含流量字节）"}
+            else:
+                data["mode"] = "clash"
+            return self._send(200, json.dumps(data, ensure_ascii=False))
         if path == "/api/tun":
             return self._send(200, json.dumps(tun_state(), ensure_ascii=False))
         if path == "/api/vpn":
