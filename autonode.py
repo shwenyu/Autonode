@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.1.0-beta.1"
+VERSION = "2.1.0-beta.2"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -598,6 +598,50 @@ def controller_alive(cfg):
         return True
     except Exception:
         return False
+
+
+ENTERPRISE_VPNS = [
+    {"name": "aTrust", "key": "atrust", "bundle": "com.electron.atrust",
+     "path": "/Applications/aTrust.app", "proc": "atrust"},
+    {"name": "EasyConnect", "key": "easyconnect", "bundle": "com.sangfor.Easyconnect",
+     "path": "/Applications/EasyConnect.app", "proc": "easyconnect"},
+    {"name": "FortiClient", "key": "forticlient", "bundle": "com.fortinet.FortiClient",
+     "path": "/Applications/FortiClient.app", "proc": "forticlient"},
+]
+
+
+def _listening_ports(proc_hint):
+    try:
+        out = subprocess.run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"],
+                             capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return []
+    ports = set()
+    for line in out.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 9 or proc_hint not in parts[0].lower():
+            continue
+        port = parts[8].rsplit(":", 1)[-1]
+        if port.isdigit():
+            ports.add(int(port))
+    return sorted(ports)
+
+
+def enterprise_vpns():
+    """已安装的企业 VPN 客户端及其运行状态（只做感知，不做登录）。"""
+    clients = [c.lower() for c in _running_vpn_clients()]
+    items = []
+    for app in ENTERPRISE_VPNS:
+        if not os.path.isdir(app["path"]):
+            continue
+        running = app["key"] in clients
+        items.append({
+            "name": app["name"],
+            "bundle": app["bundle"],
+            "running": running,
+            "ports": _listening_ports(app["proc"]) if running else [],
+        })
+    return items
 
 
 def _active_vpn_name():
@@ -2177,6 +2221,12 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
     </table>
     <div class="muted" id="vpn-msg" style="margin-top:8px"></div>
   </div>
+
+  <div class="card" id="ent-card" hidden>
+    <h2>企业 VPN</h2>
+    <table><thead><tr><th>应用</th><th style="width:90px">状态</th><th>本地端口</th><th style="width:80px"></th></tr></thead>
+    <tbody id="ent-body"></tbody></table>
+  </div>
 </section>
 
 <div class="modal" id="askmodal" hidden>
@@ -2202,6 +2252,7 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
       <h3>订阅</h3><p>粘贴订阅链接，先校验可访问性，再交给客户端导入。</p>
       <h3>站点诊断</h3><p>只在你点击时运行：串行测试哪些节点能打开目标站点，避免并发触发风控。</p>
       <h3>VPN</h3><p>系统配置型 VPN 可直接连接/断开，并可勾选「保持」每 60 秒检查、断线重连。Shadowrocket / aTrust 这类 Network Extension 应用只能识别状态并打开客户端，无法由本工具开关。</p>
+      <h3>企业 VPN</h3><p>aTrust / EasyConnect / FortiClient 只做运行状态与本地端口感知，登录与连接需在客户端内完成；它们建的是系统级隧道，优先级高于 Clash 规则。</p>
       <h3>应用</h3><p>有 Clash 时按进程显示实时连接与出口；无 Clash 时退化为系统连接统计（只有连接数，没有流量字节）。</p>
     </div>
   </div>
@@ -2751,11 +2802,25 @@ function loadVpns(){
       tun.textContent = bits.join(' · ');
     }
 
+    var ents = d.enterprise || [];
+    var entCard = el('ent-card');
+    if(entCard){
+      entCard.hidden = !ents.length;
+      if(ents.length){
+        el('ent-body').innerHTML = ents.map(function(a){
+          var q = String(a.name).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+          var b = String(a.bundle || '').replace(/"/g,'&quot;');
+          return '<tr><td>'+a.name+'</td>'
+            + '<td><span class="badge '+(a.running?'ok':'')+'">'+(a.running?'运行中':'未运行')+'</span></td>'
+            + '<td class="mono muted">'+((a.ports||[]).join(', ')||'—')+'</td>'
+            + '<td><button data-vpn-open data-bundle="'+b+'" data-name="'+q+'">打开</button></td></tr>';
+        }).join('');
+      }
+    }
+
     var msg = el('vpn-msg');
     if(msg) msg.textContent = (d.platform && d.platform !== 'Darwin')
-      ? ('当前平台 ' + d.platform + ' 暂不支持')
-      : ((d.vpns||[]).length && (d.vpns||[]).every(function(v){ return v.status === 'Unknown'; })
-          ? '这些配置未在当前网络集注册——去「打开 VPN 设置」里重新启用一次，之后这里就能连接/断开。' : '');
+      ? ('当前平台 ' + d.platform + ' 暂不支持') : '';
   }).catch(function(){});
 }
 
@@ -3547,6 +3612,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True, "vpns": list_system_vpns(), "platform": platform.system(),
                 "tunnel": _active_tunnel(),
                 "clients": _running_vpn_clients(),
+                "enterprise": enterprise_vpns(),
                 "settings_url": "x-apple.systempreferences:com.apple.NetworkExtensionSettingsUI.NESettingsUIExtension",
                 "keep": eng.cfg.get("vpn_keep") or [],
                 "interval": eng.cfg.get("vpn_interval", 60)}, ensure_ascii=False))
