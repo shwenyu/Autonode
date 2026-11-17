@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.8.3"
+VERSION = "1.8.4"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -607,6 +607,29 @@ def _active_tunnel():
     return {"iface": iface, "ip": ip}
 
 
+VPN_CLIENTS = [
+    ("shadowrocket", "Shadowrocket"),
+    ("atrust", "aTrust"),
+    ("easyconnect", "EasyConnect"),
+    ("forticlient", "FortiClient"),
+    ("wireguard", "WireGuard"),
+    ("tailscale", "Tailscale"),
+    ("surge", "Surge"),
+    ("clashx", "ClashX"),
+    ("stash", "Stash"),
+]
+
+
+def _running_vpn_clients():
+    """当前正在运行的 VPN 客户端（用于识别非托管的 NE 隧道）。"""
+    try:
+        out = subprocess.run(["ps", "-axo", "comm="], capture_output=True,
+                             text=True, timeout=8).stdout.lower()
+    except Exception:
+        return []
+    return [label for key, label in VPN_CLIENTS if key in out]
+
+
 def list_system_vpns():
     """列出系统 VPN：scutil 优先，失败时回退到网络配置。"""
     if not IS_MAC:
@@ -638,8 +661,26 @@ def list_system_vpns():
                 status = first[0].strip()
         except Exception:
             pass
-        vpns.append({"status": status, "id": svc["id"], "type": "VPN",
-                     "name": svc["name"], "proto": svc["proto"]})
+        entry = {"status": status, "id": svc["id"], "type": "VPN",
+                 "name": svc["name"], "proto": svc["proto"]}
+        if "/" in svc["proto"] and svc["proto"].split("/", 1)[0] == "VPN":
+            entry["bundle"] = svc["proto"].split("/", 1)[1]
+        vpns.append(entry)
+
+    # 非托管隧道：客户端进程在跑 + 默认路由被 utun 接管 → 视为已连接
+    clients = _running_vpn_clients()
+    tunnel = _active_tunnel()
+    for v in vpns:
+        if v.get("status") == "Unknown" and tunnel:
+            for label in clients:
+                if label.lower() in v["name"].lower() or (v.get("bundle") or "").lower().find(label.lower()) >= 0:
+                    v["status"] = "Connected (NE)"
+                    v["managed"] = False
+                    break
+        if v.get("bundle"):
+            v["managed"] = False
+        else:
+            v.setdefault("managed", True)
     return vpns
 
 
@@ -2258,32 +2299,44 @@ function loadVpns(){
   get('/api/vpn').then(function(d){
     var STATE = {'Connected':['已连接','ok'], 'Disconnected':['未连接',''],
                  'Connecting':['连接中…','warn'], 'Disconnecting':['断开中…','warn'],
-                 'Unknown':['未注册','warn']};
+                 'Connected (NE)':['已连接 · 隧道','ok'], 'Unknown':['未注册','warn']};
     var rows = (d.vpns||[]).map(function(v){
       var q = String(v.name).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
       var st = STATE[v.status] || [v.status, ''];
       var on = (v.status === 'Connected');
       var on2 = (d.keep||[]).indexOf(v.name) >= 0;
+      var bundle = v.bundle || '';
+      var action;
+      if(v.managed === false){
+        action = '<button data-vpn-open data-bundle="'+bundle+'" data-name="'+q+'">打开应用</button>';
+      } else if(v.status === 'Unknown'){
+        action = '<button data-vpn-settings>去设置</button>';
+      } else {
+        action = on ? '<button data-vpn="disconnect" data-name="'+q+'">断开</button>'
+                    : '<button data-vpn="connect" data-name="'+q+'">连接</button>';
+      }
+      var keepCell = (v.managed === false) ? '-' : '<input type="checkbox" data-keep="'+q+'"'+(on2?' checked':'')+'>';
       return '<tr><td>'+v.name+'</td><td class="muted">'+v.proto+'</td>'
         + '<td><span class="badge '+st[1]+'">'+st[0]+'</span></td>'
-        + '<td><input type="checkbox" data-keep="'+q+'"'+(on2?' checked':'')+'></td><td>'
-        + (on ? '<button data-vpn="disconnect" data-name="'+q+'">断开</button>'
-              : '<button data-vpn="connect" data-name="'+q+'">连接</button>')
-        + '</td></tr>';
+        + '<td>'+keepCell+'</td><td>'+action+'</td></tr>';
     }).join('');
     var tb = el('vpn-body');
     if(tb) tb.innerHTML = rows || '<tr><td colspan="5" class="muted">系统里没有找到 VPN 配置（可在系统设置里添加）</td></tr>';
     var link = el('vpn-settings');
     if(link && d.settings_url) link.setAttribute('href', d.settings_url);
+    if(d.settings_url) window.__vpnSettings = d.settings_url;
 
     var tun = el('vpn-tunnel');
     if(tun){
+      var bits = [];
       if(d.tunnel){
-        tun.textContent = '检测到系统隧道 ' + d.tunnel.iface
-          + (d.tunnel.ip ? '（' + d.tunnel.ip + '）' : '') + '：当前默认路由已由它接管';
-      } else {
-        tun.textContent = '';
+        bits.push('系统隧道 ' + d.tunnel.iface + (d.tunnel.ip ? '（' + d.tunnel.ip + '）' : '')
+                  + ' 已接管默认路由');
       }
+      if((d.clients||[]).length){
+        bits.push('运行中的 VPN 客户端：' + d.clients.join('、'));
+      }
+      tun.textContent = bits.join(' · ');
     }
 
     var msg = el('vpn-msg');
@@ -2334,6 +2387,19 @@ document.addEventListener('change', function(e){
 document.addEventListener('click', function(e){
   var t = e.target;
   if(!t || !t.closest) return;
+  var st = t.closest('button[data-vpn-settings]');
+  if(st){
+    if(window.__vpnSettings){ window.location.href = window.__vpnSettings; }
+    else { alert('请在系统设置 → VPN 里查看'); }
+    return;
+  }
+  var op = t.closest('button[data-vpn-open]');
+  if(op){
+    post('/api/vpn/open', {bundle: op.dataset.bundle, name: op.dataset.name}).then(function(r){
+      if(!r.ok) alert('打开失败：' + (r.error || ''));
+    });
+    return;
+  }
   var b = t.closest('button[data-vpn]');
   if(!b) return;
   b.disabled = true;
@@ -2940,6 +3006,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 "ok": True, "vpns": list_system_vpns(), "platform": platform.system(),
                 "tunnel": _active_tunnel(),
+                "clients": _running_vpn_clients(),
                 "settings_url": "x-apple.systempreferences:com.apple.NetworkExtensionSettingsUI.NESettingsUIExtension",
                 "keep": eng.cfg.get("vpn_keep") or [],
                 "interval": eng.cfg.get("vpn_interval", 60)}, ensure_ascii=False))
@@ -3037,6 +3104,19 @@ class Handler(BaseHTTPRequestHandler):
             subprocess.run(["open", out], capture_output=True)
             log("[VPN] 已生成配置描述文件：%s（等待系统确认安装）" % out)
             return self._send(200, json.dumps({"ok": True, "file": out}, ensure_ascii=False))
+        if path == "/api/vpn/open":
+            bundle = str(payload.get("bundle") or "").strip()
+            name = str(payload.get("name") or "").strip()
+            try:
+                if bundle:
+                    subprocess.Popen(["open", "-b", bundle])
+                elif name:
+                    subprocess.Popen(["open", "-a", name])
+                else:
+                    return self._send(400, json.dumps({"ok": False, "error": "缺少应用标识"}, ensure_ascii=False))
+            except Exception as exc:
+                return self._send(500, json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+            return self._send(200, json.dumps({"ok": True}, ensure_ascii=False))
         if path == "/api/vpn/keep":
             name = str(payload.get("name") or "").strip()
             enabled = bool(payload.get("enabled"))
