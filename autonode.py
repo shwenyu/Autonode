@@ -632,7 +632,7 @@ def lsof_apps():
             host = endpoint.split("->")[-1].rsplit(":", 1)[0]
             if host:
                 item["hosts"].add(host)
-    apps = [{"name": v["name"], "conns": v["conns"], "download": 0, "upload": 0,
+    apps = [{"name": v["name"], "conns": v["conns"], "download": None, "upload": None,
              "rules": [], "outbound": [], "hosts": sorted(v["hosts"])[:2]}
             for v in agg.values()]
     apps.sort(key=lambda a: -a["conns"])
@@ -1773,7 +1773,7 @@ a{color:inherit}
 .kpi{background:var(--card);border-radius:10px;padding:16px 18px;box-shadow:var(--shadow)}
 .klabel{font-size:11.5px;color:var(--text-3)}
 .kval{font-size:23px;font-weight:600;letter-spacing:-.02em;margin-top:6px;line-height:1.2}
-.kfoot{font-size:11.5px;color:var(--text-3);margin-top:6px}
+.kfoot{display:none}
 @media(max-width:1040px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
 
 /* 按钮 */
@@ -1986,7 +1986,7 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
         <button class="primary" id="ov-test">开始测速</button></div>
     </div>
     <div id="ov-bars" class="bars" style="margin-top:16px"></div>
-    <div class="muted" id="ov-test-msg" style="margin-top:14px">串行 3 次探测，约 3 秒，避免并发触发风控。</div>
+    <div class="muted" id="ov-test-msg" style="margin-top:14px"></div>
   </div>
 
   <div class="card">
@@ -2003,8 +2003,7 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
 <section id="sec-groups" hidden>
   <div class="card" id="no-clash" hidden>
     <div class="big">未检测到 Clash 控制器</div>
-    <div class="muted" style="margin-top:6px">当前可能只在使用系统 VPN（TUN）。分组选优需要 Clash Verge 等客户端在运行；
-    <a href="#vpn">到「VPN」页查看系统隧道状态</a>。</div>
+    <div class="muted" style="margin-top:6px">分组选优需要 Clash 客户端在运行，当前只有系统 VPN。</div>
   </div>
   <div class="card">
     <div class="row">
@@ -2155,7 +2154,6 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
 <div class="modal" id="vpnmodal" hidden>
   <div class="box">
     <div class="row" style="justify-content:space-between"><b>新建 VPN（生成配置描述文件）</b><button id="vpn-close" class="ghost">关闭</button></div>
-    <div class="muted">macOS 不允许应用直接写系统 VPN 配置，这里生成 .mobileconfig，由系统弹窗确认安装。安装完成后点「刷新」即可管理。</div>
     <div class="grid">
       <div><label>名称</label><input id="vpn-name" placeholder="学校 VPN"></div>
       <div><label>类型</label><select id="vpn-type"><option value="IKEv2">IKEv2</option><option value="L2TP">L2TP over IPSec</option></select></div>
@@ -2171,7 +2169,6 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
 <div class="modal" id="regionmodal" hidden>
   <div class="box">
     <div class="row" style="justify-content:space-between"><b>未识别地区的节点</b><button id="rg-close" class="ghost">关闭</button></div>
-    <div class="muted">选中地区后会记住，下次测速按新地区参与排序。</div>
     <div style="overflow:auto;max-height:55vh"><table><thead><tr><th>节点</th><th style="width:180px">地区</th></tr></thead>
     <tbody id="rg-body"></tbody></table></div>
     <div class="muted" id="rg-excluded" style="max-height:130px;overflow:auto"></div>
@@ -2182,7 +2179,6 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
 <div class="modal" id="newgroupmodal" hidden>
   <div class="box">
     <div class="row" style="justify-content:space-between"><b>新建分组</b><button id="ng-close" class="ghost">关闭</button></div>
-    <div class="muted">会写进 Clash Verge 的分组模板并重启内核（约 15 秒）。之后点「扫描新分组」纳管。</div>
     <label>分组名称</label><input id="ng-name" placeholder="例如 AI-Claude">
     <label>成员（可多选，按住 ⌘/Ctrl）</label>
     <select id="ng-members" multiple size="10" style="width:100%"></select>
@@ -2337,7 +2333,7 @@ function loadApps(){
     var head = el('apps-head');
     if(head) head.textContent = sysMode ? '连接对象' : '命中规则';
     el('apps-note').textContent = sysMode
-      ? (d.notice || '未连接 Clash，显示系统连接统计') + ' · 共 ' + d.count + ' 个应用'
+      ? ('系统统计 · ' + d.count + ' 个应用')
       : ('进程识别 ' + (d.find_process_mode || '-') + ' · 共 ' + d.count + ' 个应用');
 
     var conns = 0, dl = 0;
@@ -2365,7 +2361,7 @@ function loadApps(){
       var outColor = /DIRECT/i.test(out) ? 'var(--text-3)' : 'var(--text)';
       return '<tr><td><div class="mono">'+a.name+'</div>'
         + '<div class="muted" style="font-size:11px">'+((a.hosts||[])[0]||'')+'</div></td>'
-        + '<td>'+a.conns+'</td><td>'+fmtBytes(a.download)+' ↓</td>'
+        + '<td>'+a.conns+'</td><td>'+(sysMode ? '<span class="muted">—</span>' : fmtBytes(a.download)+' ↓')+'</td>'
         + '<td class="muted" style="font-size:12px">'+(sysMode ? ((a.hosts||[]).join(' · ')||'-') : ((a.rules||[])[0]||'-'))+'</td>'
         + '<td>' + (sysMode ? '<span class="muted">—</span>'
             : '<span class="badge '+cls+'" style="white-space:nowrap;color:'+outColor+'">'+out+'</span>') + '</td>'
@@ -2466,9 +2462,9 @@ function loadOverview(){
 
     if(clash){
       var ctl = d.controller || {};
-      el('ov-ctl').textContent = (ctl.kind === 'unix') ? 'Clash Verge' : 'TCP';
-      el('ov-ctl-foot').textContent = (ctl.kind === 'unix') ? 'unix socket'
-        : ((ctl.host || '') + ':' + (ctl.port || ''));
+      el('ov-ctl').textContent = !ctl.kind ? '无'
+        : (ctl.kind === 'unix' ? 'Clash Verge' : 'Clash');
+      if(el('ov-ctl-foot')) el('ov-ctl-foot').textContent = ctl.target || '';
       el('ov-port').textContent = d.mixed_port || '—';
       el('ov-conns').textContent = d.connections != null ? d.connections : '—';
       var sel = el('ov-group');
@@ -2481,7 +2477,7 @@ function loadOverview(){
       sel.disabled = false;
     } else {
       el('ov-ctl').textContent = '无';
-      el('ov-ctl-foot').textContent = '未发现控制器';
+      if(el('ov-ctl-foot')) el('ov-ctl-foot').textContent = '';
       el('ov-port').textContent = '—';
       el('ov-conns').textContent = '—';
       var sel2 = el('ov-group');
@@ -3262,6 +3258,8 @@ class Handler(BaseHTTPRequestHandler):
                     "controller": eng.controller, "groups": [],
                     "network": {"gateway": _default_gateway()}}
             alive = controller_alive(eng.cfg)
+            if alive:
+                eng.controller = detect_controller(eng.cfg) or eng.controller
             ctx = controller_ctx(eng.cfg)
             try:
                 if not alive:
@@ -3347,9 +3345,18 @@ class Handler(BaseHTTPRequestHandler):
                 groups.append({"id": gid, "label": runner.cfg.get("label", gid),
                                "status": snap, "config": runner.cfg})
             ctl = dict(eng.controller or {})
-            if not controller_alive(eng.cfg):
+            ok = controller_alive(eng.cfg)
+            prev = getattr(eng, "_ctl_ok", None)
+            eng._ctl_ok = ok
+            if ok:
+                ctl = detect_controller(eng.cfg) or ctl
+            else:
                 ctl = {}
             eng.controller = ctl
+            if ok and prev is False:
+                for runner in eng.runners.values():
+                    if runner.cfg.get("enabled"):
+                        runner.run(block=False)
             body = {"enabled": eng.cfg["enabled"], "port": eng.cfg["port"],
                     "version": VERSION,
                     "controller": eng.controller,
@@ -3426,7 +3433,7 @@ class Handler(BaseHTTPRequestHandler):
                 apps = lsof_apps()
                 data = {"ok": True, "apps": apps, "count": len(apps), "mode": "system",
                         "tun": False, "find_process_mode": "",
-                        "notice": "未连接 Clash，显示系统连接统计（不含流量字节）"}
+                        "notice": "系统统计"}
             else:
                 data["mode"] = "clash"
             return self._send(200, json.dumps(data, ensure_ascii=False))
