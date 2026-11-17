@@ -53,6 +53,7 @@ jobs:
         with:
           files: Autonode-*.pkg
           fail_on_unmatched_files: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
   windows:
     name: Windows bundle
@@ -91,3 +92,4 @@ jobs:
         with:
           files: autonode-windows-*.zip
           fail_on_unmatched_files: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

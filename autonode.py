@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.0.0"
+VERSION = "2.1.0-beta.1"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -610,6 +610,27 @@ def _active_vpn_name():
     return clients[0]
 
 
+def nettop_bytes():
+    """按进程累计流量（nettop 采样，无 Clash 时使用）。"""
+    try:
+        out = subprocess.run(["nettop", "-x", "-l", "1", "-J", "bytes_in,bytes_out"],
+                             capture_output=True, text=True, timeout=20).stdout
+    except Exception:
+        return {}
+    totals = {}
+    for line in out.splitlines():
+        m = re.match(r"^(\S+?)(?:\.\d+)?\s+(\d+)\s+(\d+)\s*$", line)
+        if not m:
+            continue
+        name = m.group(1)
+        down = int(m.group(2))
+        up = int(m.group(3))
+        item = totals.setdefault(name.lower(), {"name": name, "download": 0, "upload": 0})
+        item["download"] += down
+        item["upload"] += up
+    return totals
+
+
 def lsof_apps():
     """无 Clash 时用系统连接表粗略统计每个应用的连接。"""
     try:
@@ -632,10 +653,21 @@ def lsof_apps():
             host = endpoint.split("->")[-1].rsplit(":", 1)[0]
             if host:
                 item["hosts"].add(host)
-    apps = [{"name": v["name"], "conns": v["conns"], "download": None, "upload": None,
-             "rules": [], "outbound": [], "hosts": sorted(v["hosts"])[:2]}
-            for v in agg.values()]
-    apps.sort(key=lambda a: -a["conns"])
+    totals = nettop_bytes()
+    apps = []
+    for v in agg.values():
+        low = v["name"].lower()
+        hit = totals.get(low)
+        if hit is None:
+            for key, val in totals.items():
+                if key.startswith(low) or low.startswith(key):
+                    hit = val
+                    break
+        apps.append({"name": v["name"], "conns": v["conns"],
+                     "download": (hit["download"] if hit else None),
+                     "upload": (hit["upload"] if hit else None),
+                     "rules": [], "outbound": [], "hosts": sorted(v["hosts"])[:2]})
+    apps.sort(key=lambda a: -((a["download"] or 0) + (a["upload"] or 0)))
     return apps
 
 
@@ -1859,6 +1891,11 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
 .manual p{font-size:12.5px;color:var(--text-2);margin:0 0 2px;line-height:1.6}
 .manual h3:first-child{margin-top:2px}
 
+#toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#111;color:#fff;
+  padding:9px 16px;border-radius:10px;font-size:12.5px;z-index:80;box-shadow:0 8px 24px rgba(17,17,17,.18);
+  animation:rise .2s ease both}
+#toast[hidden]{display:none}
+
 /* 弹窗 */
 .modal{position:fixed;inset:0;background:rgba(17,17,17,.28);
   backdrop-filter:saturate(120%) blur(6px);-webkit-backdrop-filter:saturate(120%) blur(6px);
@@ -1927,6 +1964,9 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
         <button data-nav="site">
           <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17"/><path d="M12 3.5c2.6 2.6 2.6 14.4 0 17-2.6-2.6-2.6-14.4 0-17z"/></svg>
           站点诊断</button>
+        <button data-nav="tun">
+          <svg viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h10"/></svg>
+          TUN</button>
         <button data-nav="vpn">
           <svg viewBox="0 0 24 24"><path d="M12 3.5 19 6v5.6c0 4-2.9 6.9-7 8.9-4.1-2-7-4.9-7-8.9V6z"/></svg>
           VPN</button>
@@ -2019,18 +2059,6 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
 
 <section id="sec-routes" hidden>
   <div class="card">
-    <div class="row" style="justify-content:space-between">
-      <div><h2 style="margin:0;display:inline">TUN 状态</h2> <span id="tun-badge" class="badge">-</span></div>
-      <button id="tun-refresh" class="ghost">刷新</button>
-    </div>
-    <div class="muted" id="tun-info" style="margin-top:8px">-</div>
-    <div class="row" style="margin-top:10px">
-      <input id="tun-proc" placeholder="进程名，例如 codex" style="width:220px">
-      <button id="tun-add">生成进程规则</button>
-      <span class="muted" id="tun-msg"></span>
-    </div>
-  </div>
-  <div class="card">
     <h2>分流规则（全局）</h2>
     <table><thead><tr><th style="width:150px">匹配方式</th><th>值</th><th style="width:190px">走向</th><th style="width:52px"></th></tr></thead>
     <tbody id="rt"></tbody></table>
@@ -2097,9 +2125,22 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
       <tbody id="apps-body"></tbody>
     </table>
   </div>
+</section>
+
+<section id="sec-tun" hidden>
   <div class="card">
-    <h2>进程规则</h2>
-    <table><thead><tr><th>进程</th><th style="width:200px">走向</th><th style="width:60px"></th></tr></thead>
+    <div class="row" style="justify-content:space-between">
+      <div><h2 style="margin:0;display:inline">TUN</h2> <span id="tun-badge" class="badge">-</span></div>
+      <button id="tun-refresh" class="ghost">刷新</button>
+    </div>
+    <div class="muted" id="tun-info" style="margin-top:8px">-</div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">进程规则</h2>
+    </div>
+    <table style="margin-top:6px"><thead><tr><th>进程</th><th style="width:200px">走向</th><th style="width:60px"></th></tr></thead>
     <tbody id="proc-body"></tbody></table>
     <div class="row" style="margin-top:10px">
       <input id="proc-name" list="proc-list" placeholder="进程名，例如 codex" style="flex:1">
@@ -2107,6 +2148,16 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
       <select id="proc-target" style="width:200px"></select>
       <button id="proc-add">添加规则</button>
       <span class="muted" id="proc-msg"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">排除网段</h2>
+      <button id="tun-copy" class="ghost">复制</button>
+    </div>
+    <div class="mono muted" id="tun-exclude" style="margin-top:8px;line-height:1.9">
+      10.0.0.0/8<br>172.16.0.0/12<br>192.168.0.0/16<br>127.0.0.0/8<br>169.254.0.0/16
     </div>
   </div>
 </section>
@@ -2127,6 +2178,19 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
     <div class="muted" id="vpn-msg" style="margin-top:8px"></div>
   </div>
 </section>
+
+<div class="modal" id="askmodal" hidden>
+  <div class="box" style="max-width:420px;gap:10px">
+    <div id="ask-title" style="font-weight:600;font-size:15px"></div>
+    <div id="ask-body" class="muted" style="font-size:13px;line-height:1.6"></div>
+    <div class="row" style="justify-content:flex-end;gap:6px;margin-top:4px">
+      <button id="ask-cancel" class="ghost">取消</button>
+      <button id="ask-ok" class="primary">确定</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" hidden></div>
 
 <div class="modal" id="helpmodal" hidden>
   <div class="box">
@@ -2197,7 +2261,7 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
 </div>
 <script>
 var STATUS=null, CTL={}, ROUTES=[], RT_TARGETS=[], SITE={}, NAV='overview';
-var TITLES = {overview:'概览', groups:'分组', routes:'分流规则', sub:'订阅', site:'站点诊断', vpn:'系统 VPN', apps:'应用分流'};
+var TITLES = {overview:'概览', groups:'分组', routes:'分流规则', sub:'订阅', site:'站点诊断', vpn:'系统 VPN', apps:'应用分流', tun:'TUN'};
 var PROVIDERS=[];
 
 function loadProviders(){
@@ -2230,11 +2294,12 @@ document.querySelectorAll('[data-nav]').forEach(function(b){
     var pt = el('pagetitle'); if(pt) pt.textContent = TITLES[NAV] || '';
     if(location.hash !== '#' + NAV){ try{ history.replaceState(null,'','#'+NAV); }catch(e){} }
     document.querySelectorAll('[data-nav]').forEach(function(x){ x.classList.toggle('on', x===b); });
-    ['overview','groups','routes','sub','site','vpn','apps'].forEach(function(n){ el('sec-'+n).hidden = (n!==NAV); });
+    ['overview','groups','routes','sub','site','vpn','apps','tun'].forEach(function(n){ el('sec-'+n).hidden = (n!==NAV); });
     if(NAV==='overview') loadOverview();
     if(NAV==='routes'){ loadRoutes(); loadTun(); }
     if(NAV==='site' && STATUS) fillSiteGroups(STATUS);
     if(NAV==='vpn') loadVpns();
+    if(NAV==='tun'){ loadTun(); loadRoutes(); }
     if(NAV==='apps'){ loadRoutes(); loadApps(); }
   };
 });
@@ -2298,6 +2363,33 @@ document.addEventListener('change', function(e){
     el('rg-msg').textContent = '已保存：' + sel.dataset.rg + ' → ' + (sel.value || '未设置');
   });
 });
+
+function askModal(title, body, okText, cb){
+  el('ask-title').textContent = title;
+  el('ask-body').textContent = body;
+  el('ask-ok').textContent = okText || '确定';
+  el('askmodal').hidden = false;
+  window.__askCb = cb;
+}
+
+if(el('ask-cancel')) el('ask-cancel').onclick = function(){ el('askmodal').hidden = true; window.__askCb = null; };
+if(el('ask-ok')) el('ask-ok').onclick = function(){
+  el('askmodal').hidden = true;
+  var cb = window.__askCb; window.__askCb = null; if(cb) cb();
+};
+if(el('askmodal')) el('askmodal').onclick = function(e){
+  if(e.target === el('askmodal')){ el('askmodal').hidden = true; window.__askCb = null; }
+};
+
+var toastTimer = null;
+function notify(msg){
+  var t = el('toast');
+  if(!t) return;
+  t.textContent = msg;
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function(){ t.hidden = true; }, 2400);
+}
 
 function fmtBytes(n){
   n = n || 0;
@@ -2548,6 +2640,10 @@ function loadTun(){
 }
 
 if(el('tun-refresh')) el('tun-refresh').onclick = loadTun;
+if(el('tun-copy')) el('tun-copy').onclick = function(){
+  var text = (el('tun-exclude') ? el('tun-exclude').innerText : '').trim();
+  if(navigator.clipboard){ navigator.clipboard.writeText(text).then(function(){ notify('已复制排除网段'); }); }
+};
 if(el('tun-add')) el('tun-add').onclick = function(){
   var proc = (el('tun-proc').value || '').trim();
   if(!proc){ el('tun-msg').textContent = '先填进程名'; return; }
@@ -2706,13 +2802,13 @@ document.addEventListener('click', function(e){
   var st = t.closest('button[data-vpn-settings]');
   if(st){
     if(window.__vpnSettings){ window.location.href = window.__vpnSettings; }
-    else { alert('请在系统设置 → VPN 里查看'); }
+    else { notify('请在系统设置 → VPN 里查看'); }
     return;
   }
   var op = t.closest('button[data-vpn-open]');
   if(op){
     post('/api/vpn/open', {bundle: op.dataset.bundle, name: op.dataset.name}).then(function(r){
-      if(!r.ok) alert('打开失败：' + (r.error || ''));
+      if(!r.ok) notify('打开失败：' + (r.error || ''));
     });
     return;
   }
@@ -2720,7 +2816,7 @@ document.addEventListener('click', function(e){
   if(!b) return;
   b.disabled = true;
   post('/api/vpn',{name:b.dataset.name, action:b.dataset.vpn}).then(function(r){
-    if(!r.ok) alert('操作失败：' + (r.error || r.output || ''));
+    if(!r.ok) notify('操作失败：' + (r.error || r.output || ''));
     setTimeout(loadVpns, 1500);
   });
 });
@@ -2774,17 +2870,22 @@ function closeLog(){
 el('logbtn').onclick = openLog;
 
 el('quitbtn').onclick = function(){
-  if(!confirm('退出后台服务？\n\n退出后自动选节点、AI 通道保活都会停止，网页也会无法访问。\n（关闭窗口不会停止服务，只有这个按钮会）')) return;
-  post('/api/service',{action:'stop'}).then(function(){
-    document.body.innerHTML = '<div style="padding:60px;text-align:center;color:#8b93a7">服务已退出。要重新启动：<br><br>'
-      + '<code style="color:#e6e9ef">launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/*autonode.plist</code></div>';
+  askModal('退出后台服务', '自动选节点与 AI 保活会停止，页面将无法访问。', '退出', function(){
+    post('/api/service',{action:'stop'}).then(function(r){
+      if(!r.ok){ notify('退出失败：' + (r.error || '')); return; }
+      document.body.innerHTML = '<div style="display:flex;height:100vh;align-items:center;justify-content:center;'
+        + 'font:14px -apple-system;color:#767b83">服务已退出</div>';
+      setTimeout(function(){ try { window.close(); } catch(e){} }, 500);
+    });
   });
 };
 
 el('restartbtn').onclick = function(){
-  if(!confirm('重启后台服务？页面会在几秒后断开，之后刷新即可重连。')) return;
-  post('/api/service',{action:'restart'}).then(function(){
-    el('state').textContent = '重启中…';
+  askModal('重启后台服务', '页面会断开几秒，之后刷新即可重连。', '重启', function(){
+    post('/api/service',{action:'restart'}).then(function(r){
+      if(!r.ok){ notify('重启失败：' + (r.error || '')); return; }
+      el('state').textContent = '重启中…';
+    });
   });
 };
 el('logreload').onclick = loadLog;
@@ -2954,7 +3055,9 @@ document.addEventListener('click', function(e){
   if(act==='run'){ post('/api/run',{id:gid}); setTimeout(refresh,800); }
   else if(act==='toggle'){ post('/api/config',{id:gid,patch:{enabled:!g.config.enabled}}).then(refresh); }
   else if(act==='remove'){
-    if(confirm('不再自动管理「'+g.label+'」？')){ post('/api/groups/remove',{id:gid}).then(function(){ refresh(); }); }
+    askModal('移除分组', '不再自动管理「' + g.label + '」，客户端配置不受影响。', '移除', function(){
+      post('/api/groups/remove',{id:gid}).then(function(){ refresh(); });
+    });
   }
   else if(act==='switch'){ post('/api/switch',{id:gid,name:btn.dataset.node}).then(function(){ setTimeout(refresh,600); }); }
   else if(act==='collapse'){
