@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.1.1-beta.2"
+VERSION = "2.1.1-beta.3"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -2459,6 +2459,19 @@ function fmtBytes(n){
   return n + ' B';
 }
 
+function fillProcTargets(){
+  var sel = el('proc-target');
+  if(!sel) return;
+  var keep = sel.value;
+  sel.innerHTML = RT_TARGETS.map(function(t){
+    var q = String(t).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+    return '<option value="'+q+'">'+t+'</option>';
+  }).join('');
+  if(keep && RT_TARGETS.indexOf(keep) >= 0){ sel.value = keep; return; }
+  var ai = RT_TARGETS.filter(function(t){ return /(^|[^A-Za-z])AI([^A-Za-z]|$)/i.test(t); })[0];
+  sel.value = ai || RT_TARGETS[0] || '';
+}
+
 function renderProcRules(){
   var rows = (ROUTES || []).filter(function(r){ return r.type === 'PROCESS-NAME'; });
   var tb = el('proc-body');
@@ -2544,8 +2557,15 @@ document.addEventListener('click', function(e){
   if(!t || !t.closest) return;
   var b = t.closest('button[data-apprule]');
   if(b){
-    el('proc-name').value = b.dataset.apprule;
-    el('proc-name').focus();
+    var proc = b.dataset.apprule;
+    var tunBtn = document.querySelector('[data-nav="tun"]');
+    if(tunBtn) tunBtn.click();
+    fillProcTargets();
+    setTimeout(function(){
+      var pn = el('proc-name');
+      if(pn){ pn.value = proc; pn.focus(); }
+      notify('已填入进程名，选择走向后点「添加规则」');
+    }, 80);
     return;
   }
   var d = t.closest('button[data-procdel]');
@@ -2713,6 +2733,7 @@ function loadTun(){
 }
 
 if(el('tun-refresh')) el('tun-refresh').onclick = loadTun;
+if(el('proc-target')) fillProcTargets();
 if(el('tun-copy')) el('tun-copy').onclick = function(){
   var text = (el('tun-exclude') ? el('tun-exclude').innerText : '').trim();
   if(navigator.clipboard){ navigator.clipboard.writeText(text).then(function(){ notify('已复制排除网段'); }); }
