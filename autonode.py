@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.1.1-beta.5"
+VERSION = "2.2.0-beta.1"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -293,6 +293,8 @@ DEFAULT_CONFIG = {
     "custom_groups": [],
     "vpn_keep": [],
     "region_overrides": {},
+    "sub_health": {},
+    "sub_poll_interval": 600,
     "vpn_interval": 60,
     "routes": [],
 }
@@ -336,6 +338,7 @@ def _normalize_group(item):
 
 
 def load_config():
+    """读取配置：以默认值为底，合并已保存的全部键（不再白名单）。"""
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as fh:
@@ -343,20 +346,22 @@ def load_config():
     except Exception:
         return cfg
 
-    if isinstance(saved, dict):
-        if "socket" in saved:
-            cfg["socket"] = saved["socket"]
-        if "port" in saved:
-            cfg["port"] = saved["port"]
-        if "enabled" in saved:
-            cfg["enabled"] = bool(saved["enabled"])
-        if isinstance(saved.get("groups"), list) and saved["groups"]:
-            cfg["groups"] = [_normalize_group(g) for g in saved["groups"]]
-        elif "group" in saved:  # 兼容旧版单组配置
-            legacy = {k: v for k, v in saved.items() if k not in ("port", "socket", "enabled")}
-            legacy.setdefault("id", "main")
-            legacy.setdefault("label", legacy.get("group", "手动选择节点"))
-            cfg["groups"] = [_normalize_group(legacy), _normalize_group(DEFAULT_GROUPS[1])]
+    if not isinstance(saved, dict):
+        return cfg
+
+    for key, val in saved.items():
+        if key in ("group", "groups"):
+            continue
+        cfg[key] = val
+
+    groups = saved.get("groups")
+    if isinstance(groups, list) and groups:
+        cfg["groups"] = [_normalize_group(g) for g in groups]
+    elif "group" in saved:  # 兼容旧版单组配置
+        legacy = {k: v for k, v in saved.items() if k not in ("port", "socket", "enabled")}
+        legacy.setdefault("id", "main")
+        legacy.setdefault("label", legacy.get("group", "手动选择节点"))
+        cfg["groups"] = [_normalize_group(legacy), _normalize_group(DEFAULT_GROUPS[1])]
     return cfg
 
 
@@ -633,6 +638,125 @@ def traffic_sampler(engine):
         except Exception:
             pass
         time.sleep(2)
+
+
+def _profiles_path():
+    cfg = load_config()
+    d = cfg.get("clash_dir") or detect_clash_dir()
+    return os.path.join(d, "profiles.yaml") if d else ""
+
+
+def read_subscriptions():
+    """解析 Verge 的 profiles.yaml，列出远程订阅。"""
+    path = _profiles_path()
+    if not path or not os.path.exists(path):
+        return "", []
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        return "", []
+    m = re.search(r"^current:\s*(\S+)\s*$", text, re.M)
+    current = m.group(1) if m else ""
+    items = []
+    for blk in re.split(r"\n(?=- uid: )", text):
+        uid = re.search(r"^- uid:\s*(\S+)", blk, re.M)
+        if not uid:
+            continue
+        typ = re.search(r"^\s+type:\s*(\S+)", blk, re.M)
+        if not typ or typ.group(1) != "remote":
+            continue
+        name = re.search(r"^\s+name:\s*(.+?)\s*$", blk, re.M)
+        url = re.search(r"^\s+url:\s*(\S+)", blk, re.M)
+        upd = re.search(r"^\s+updated:\s*(\d+)", blk, re.M)
+        upload = re.search(r"^\s+upload:\s*(\d+)", blk, re.M)
+        download = re.search(r"^\s+download:\s*(\d+)", blk, re.M)
+        total = re.search(r"^\s+total:\s*(\d+)", blk, re.M)
+        expire = re.search(r"^\s+expire:\s*(\d+)", blk, re.M)
+        items.append({
+            "uid": uid.group(1),
+            "name": (name.group(1).strip("'\"") if name else uid.group(1)),
+            "url": url.group(1) if url else "",
+            "updated": int(upd.group(1)) if upd else 0,
+            "upload": int(upload.group(1)) if upload else 0,
+            "download": int(download.group(1)) if download else 0,
+            "total": int(total.group(1)) if total else 0,
+            "expire": int(expire.group(1)) if expire else 0,
+        })
+    return current, items
+
+
+def _sub_probe(url):
+    """拉一次订阅，返回可用性样本。"""
+    t0 = time.time()
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "clash-verge/v2.0.0"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = resp.read()
+            code = resp.status
+        ms = int((time.time() - t0) * 1000)
+        text = data.decode("utf-8", "ignore")
+        nodes = text.count("type: vless") + text.count("type: vmess") + text.count("type: trojan") \
+            + text.count("type: ss") + text.count("type: hysteria")
+        return {"t": int(time.time()), "ok": code == 200 and len(data) > 200,
+                "ms": ms, "bytes": len(data), "nodes": nodes, "code": code}
+    except Exception as exc:
+        return {"t": int(time.time()), "ok": False, "ms": None, "bytes": 0,
+                "nodes": 0, "code": 0, "error": str(exc)[:120]}
+
+
+def poll_subscriptions(engine, force=False):
+    cfg = engine.cfg
+    health = dict(cfg.get("sub_health") or {})
+    current, items = read_subscriptions()
+    for it in items:
+        if not it["url"]:
+            continue
+        sample = _sub_probe(it["url"])
+        rec = dict(health.get(it["uid"]) or {})
+        samples = list(rec.get("samples") or [])
+        samples.append(sample)
+        rec["samples"] = samples[-24:]
+        health[it["uid"]] = rec
+    cfg["sub_health"] = health
+    save_config(cfg)
+    return health
+
+
+def sub_poller(engine):
+    while True:
+        try:
+            interval = max(120, int(engine.cfg.get("sub_poll_interval", 600)))
+        except Exception:
+            interval = 600
+        time.sleep(interval)
+        try:
+            poll_subscriptions(engine)
+        except Exception:
+            pass
+
+
+def switch_subscription(engine, uid):
+    """切换当前订阅（需要重启 Verge 才会生效）。"""
+    path = _profiles_path()
+    if not path or not os.path.exists(path):
+        return {"ok": False, "error": "找不到 profiles.yaml"}
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
+    if not re.search(r"^- uid:\s*%s\s*$" % re.escape(uid), text, re.M):
+        return {"ok": False, "error": "订阅不存在"}
+    shutil.copy2(path, path + ".bak-autonode")
+    new_text = re.sub(r"^current:\s*\S+\s*$", "current: %s" % uid, text, count=1, flags=re.M)
+    # 先退出 Verge，避免它退出时覆盖我们的修改
+    subprocess.run(["pkill", "-TERM", "-f", "Clash Verge.app/Contents/MacOS/clash-verge"],
+                   capture_output=True)
+    time.sleep(4)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(new_text)
+    subprocess.run(["open", "-b", "io.github.clash-verge-rev.clash-verge-rev"],
+                   capture_output=True)
+    return {"ok": True, "uid": uid}
 
 
 def controller_alive(cfg):
@@ -2187,6 +2311,19 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
 
 <section id="sec-sub" hidden>
   <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">订阅</h2>
+      <div class="row"><button id="sub-poll" class="ghost">检测</button>
+        <button id="sub-refresh" class="ghost">刷新</button></div>
+    </div>
+    <table style="margin-top:6px">
+      <thead><tr><th>名称</th><th style="width:64px">当前</th><th style="width:120px">用量</th>
+      <th style="width:96px">到期</th><th style="width:120px">更新</th><th>可用性</th><th style="width:84px"></th></tr></thead>
+      <tbody id="subs-body"></tbody>
+    </table>
+  </div>
+
+  <div class="card">
     <h2>订阅导入</h2>
     <div class="row">
       <input id="sub-url" placeholder="https://example.com/api/v1/client/subscribe?token=..." style="flex:1">
@@ -2411,6 +2548,7 @@ document.querySelectorAll('[data-nav]').forEach(function(b){
     if(NAV==='routes'){ loadRoutes(); loadTun(); }
     if(NAV==='site' && STATUS) fillSiteGroups(STATUS);
     if(NAV==='vpn') loadVpns();
+    if(NAV==='sub') loadSubs();
     if(NAV==='tun'){ loadTun(); loadRoutes(); }
     if(NAV==='apps'){ loadRoutes(); loadApps(); }
   };
@@ -2649,6 +2787,90 @@ if(el('proc-add')) el('proc-add').onclick = function(){
     renderProcRules();
   });
 };
+
+function fmtGB(n){
+  if(!n) return '—';
+  return (n / 1073741824).toFixed(1) + ' GB';
+}
+
+function fmtDate(ts){
+  if(!ts) return '—';
+  var d = new Date(ts * 1000);
+  var p = function(x){ return (x < 10 ? '0' : '') + x; };
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+
+function fmtTime(ts){
+  if(!ts) return '—';
+  var d = new Date(ts * 1000);
+  var p = function(x){ return (x < 10 ? '0' : '') + x; };
+  return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+function renderSubs(d){
+  var tb = el('subs-body');
+  if(!tb) return;
+  var items = d.items || [];
+  if(!items.length){
+    tb.innerHTML = '<tr><td colspan="7" class="muted">没有找到订阅</td></tr>';
+    return;
+  }
+  tb.innerHTML = items.map(function(it){
+    var isCur = (it.uid === d.current);
+    var used = (it.upload || 0) + (it.download || 0);
+    var dots = (it.samples || []).map(function(sp){
+      var c = sp.ok ? 'var(--ok)' : 'var(--bad)';
+      return '<span style="display:inline-block;width:5px;height:5px;border-radius:50%;background:' + c + ';margin-right:3px"></span>';
+    }).join('');
+    var health = it.total_count
+      ? (it.ok_count + '/' + it.total_count + ' · ' + (it.avg_ms ? it.avg_ms + ' ms' : '—'))
+      : '未检测';
+    var q = String(it.uid).replace(/"/g, '&quot;');
+    var act = isCur ? '<span class="muted">使用中</span>'
+      : '<button data-sub-act="' + q + '">切换</button>';
+    return '<tr><td>' + it.name + '</td>'
+      + '<td>' + (isCur ? '<span class="badge ok">当前</span>' : '') + '</td>'
+      + '<td class="muted">' + (used ? (used / 1073741824).toFixed(1) : '0') + ' / '
+      + (it.total ? Math.round(it.total / 1073741824) : '—') + ' GB</td>'
+      + '<td class="muted">' + fmtDate(it.expire) + '</td>'
+      + '<td class="muted">' + fmtTime(it.updated) + '</td>'
+      + '<td><div>' + dots + '</div><div class="muted" style="font-size:11.5px;margin-top:3px">' + health + '</div></td>'
+      + '<td>' + act + '</td></tr>';
+  }).join('');
+}
+
+function loadSubs(){
+  get('/api/subscriptions').then(function(d){
+    if(!d.ok) return;
+    renderSubs(d);
+  }).catch(function(){});
+}
+
+if(el('sub-refresh')) el('sub-refresh').onclick = loadSubs;
+if(el('sub-poll')) el('sub-poll').onclick = function(){
+  el('sub-poll').disabled = true;
+  notify('正在检测订阅…');
+  post('/api/subscriptions/poll', {}).then(function(){
+    el('sub-poll').disabled = false;
+    loadSubs();
+    notify('检测完成');
+  }).catch(function(){ el('sub-poll').disabled = false; });
+};
+
+document.addEventListener('click', function(e){
+  var t = e.target;
+  if(!t || !t.closest) return;
+  var b = t.closest('button[data-sub-act]');
+  if(!b) return;
+  var uid = b.dataset.subAct;
+  askModal('切换订阅', '会退出并重启 Clash Verge，约 15–20 秒；切换后分组与规则随新订阅变化。', '切换', function(){
+    post('/api/subscriptions/activate', {uid: uid}).then(function(r){
+      if(!r.ok){ notify('切换失败：' + (r.error || '')); return; }
+      notify('已切换，正在重启客户端…');
+      setTimeout(function(){ location.reload(); }, 18000);
+    });
+  });
+});
 
 function loadOverview(){
   get('/api/overview').then(function(d){
@@ -3334,8 +3556,14 @@ function renderRoutes(d){
       var q = String(t).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
       return '<option value="'+q+'"'+(t === r.target ? ' selected' : '')+'>'+t+'</option>';
     }).join('');
+    var bad = RT_TARGETS.indexOf(r.target) < 0;
+    var tgt = bad
+      ? r.target + ' <span class="badge bad">缺失</span>'
+      : r.target;
     return '<tr><td>'+r.type+'</td><td class="mono">'+r.value+'</td>'
-      + '<td><select data-rtt="'+i+'" style="width:100%">'+opts+'</select></td>'
+      + '<td><select data-rtt="'+i+'" style="width:100%">'+opts+'</select>'
+      + (bad ? '<div class="muted" style="font-size:11px;margin-top:3px">当前订阅没有这个分组</div>' : '')
+      + '</td>'
       + '<td><button data-rtdel="'+i+'">删</button></td></tr>';
   }).join('') || '<tr><td colspan="4" class="muted">还没有规则</td></tr>';
   if(d && d.rules_uid === null) el('rt-msg').textContent = '提示：当前订阅没有「规则」模板，应用会失败。';
@@ -3756,6 +3984,24 @@ class Handler(BaseHTTPRequestHandler):
             names = [k for k, v in data.items()
                      if v.get("type") not in ("Selector", "URLTest", "Fallback", "Direct", "Reject", "Compatible")]
             return self._send(200, json.dumps({"ok": True, "proxies": names}, ensure_ascii=False))
+        if path == "/api/subscriptions":
+            current, items = read_subscriptions()
+            health = eng.cfg.get("sub_health") or {}
+            for it in items:
+                rec = health.get(it["uid"]) or {}
+                samples = rec.get("samples") or []
+                ok = [x for x in samples if x.get("ok")]
+                it["samples"] = samples[-12:]
+                it["ok_count"] = len(ok)
+                it["total_count"] = len(samples)
+                it["avg_ms"] = round(sum(x["ms"] for x in ok if x.get("ms")) / len(ok)) if ok else None
+                it["last_ms"] = samples[-1]["ms"] if samples else None
+                it["last_ok"] = bool(samples[-1]["ok"]) if samples else None
+                it["nodes_seen"] = samples[-1]["nodes"] if samples else 0
+            return self._send(200, json.dumps({
+                "ok": True, "current": current, "items": items,
+                "interval": eng.cfg.get("sub_poll_interval", 600),
+            }, ensure_ascii=False))
         if path == "/api/presets/ai":
             return self._send(200, json.dumps({"ok": True, "domains": AI_DOMAINS},
                                               ensure_ascii=False))
@@ -3818,6 +4064,13 @@ class Handler(BaseHTTPRequestHandler):
             res = apply_update(str(payload.get("url") or ""),
                                str(payload.get("name") or ""),
                                str(payload.get("mode") or "install"))
+            return self._send(200, json.dumps(res, ensure_ascii=False))
+        if path == "/api/subscriptions/poll":
+            poll_subscriptions(self.engine, force=True)
+            return self._send(200, json.dumps({"ok": True}, ensure_ascii=False))
+        if path == "/api/subscriptions/activate":
+            uid = str(payload.get("uid") or "").strip()
+            res = switch_subscription(self.engine, uid)
             return self._send(200, json.dumps(res, ensure_ascii=False))
         if path == "/api/vpn":
             res = vpn_action(str(payload.get("name") or ""), str(payload.get("action") or ""))
@@ -3979,6 +4232,7 @@ def main(argv):
             % (port, "、".join(g["label"] for g in engine.cfg["groups"])))
         engine.start()
         threading.Thread(target=vpn_watchdog, args=(engine,), daemon=True).start()
+        threading.Thread(target=sub_poller, args=(engine,), daemon=True).start()
         threading.Thread(target=traffic_sampler, args=(engine,), daemon=True).start()
         try:
             httpd.serve_forever()
