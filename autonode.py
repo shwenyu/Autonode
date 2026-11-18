@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.1.1-beta.3"
+VERSION = "2.1.1-beta.4"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -1790,6 +1790,7 @@ PAGE = r"""<!doctype html>
   --shadow:0 1px 2px rgba(17,17,17,.04),0 4px 16px rgba(17,17,17,.04);
 }
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 html,body{height:100%}
 body{margin:0;background:var(--page);color:var(--text);
   font:14px/1.55 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",sans-serif;
@@ -2078,7 +2079,7 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
         <button class="primary" id="ov-test">开始测速</button></div>
     </div>
     <div class="row" style="margin-top:16px;gap:12px">
-      <span id="ov-result" style="font-size:26px;font-weight:600;letter-spacing:-.02em">—</span>
+      <span id="ov-result" style="font-size:15px;font-weight:500;color:var(--text-3)">未测速</span>
       <span id="ov-stab" class="badge" hidden></span>
     </div>
   </div>
@@ -2648,6 +2649,8 @@ function loadOverview(){
       }).join('');
       if(cur) sel.value = cur;
       sel.disabled = false;
+      sel.onchange = function(){ renderOvResult(); };
+      renderOvResult();
     } else {
       el('ov-ctl').textContent = '无';
       if(el('ov-ctl-foot')) el('ov-ctl-foot').textContent = '';
@@ -2656,8 +2659,37 @@ function loadOverview(){
       var sel2 = el('ov-group');
       sel2.innerHTML = '<option value="">系统 VPN（直连测量）</option>';
       sel2.disabled = true;
+      renderOvResult();
     }
   }).catch(function(){});
+}
+
+var OV_RESULT = {};
+
+function ovKey(){
+  var gid = el('ov-group') ? el('ov-group').value : '';
+  return window.__ovClash ? (gid || '') : 'system';
+}
+
+function renderOvResult(){
+  var res = el('ov-result'), badge = el('ov-stab');
+  if(!res) return;
+  var r = OV_RESULT[ovKey()];
+  if(!r){
+    res.textContent = '未测速';
+    res.style.fontSize = '15px';
+    res.style.fontWeight = '500';
+    res.style.color = 'var(--text-3)';
+    if(badge) badge.hidden = true;
+    if(el('ov-delay')) el('ov-delay').textContent = '—';
+    return;
+  }
+  res.textContent = r.avg + ' ms';
+  res.style.fontSize = '26px';
+  res.style.fontWeight = '600';
+  res.style.color = '';
+  if(badge){ badge.hidden = false; badge.textContent = r.label; badge.className = 'badge ' + r.cls; }
+  if(el('ov-delay')) el('ov-delay').textContent = r.avg + ' ms';
 }
 
 if(el('ov-test')) el('ov-test').onclick = function(){
@@ -2675,22 +2707,18 @@ if(el('ov-test')) el('ov-test').onclick = function(){
       el('ov-result').textContent = d.error || '测速失败';
       return;
     }
-    el('ov-result').textContent = (d.avg || '—') + ' ms';
-
     var jitter = d.jitter || 0;
     var okCount = d.ok_count || 0;
     var avg = d.avg || 0;
     var stable = okCount === 3 && jitter <= Math.max(30, Math.round(avg * 0.25));
     var mid = okCount === 3 && jitter <= Math.max(80, Math.round(avg * 0.6));
 
-    var badge = el('ov-stab');
-    badge.hidden = false;
-    if(stable){ badge.textContent = '稳定'; badge.className = 'badge ok'; }
-    else if(mid){ badge.textContent = '一般'; badge.className = 'badge warn'; }
-    else { badge.textContent = '不稳定'; badge.className = 'badge bad'; }
-
-    el('ov-delay').textContent = (d.avg || '—') + ' ms';
-    if(el('ov-delay-foot')) el('ov-delay-foot').textContent = '';
+    OV_RESULT[ovKey()] = {
+      avg: avg || '—',
+      label: stable ? '稳定' : (mid ? '一般' : '不稳定'),
+      cls: stable ? 'ok' : (mid ? 'warn' : 'bad')
+    };
+    renderOvResult();
   }).catch(function(){
     el('ov-test').disabled = false;
     el('ov-result').textContent = '请求失败';
