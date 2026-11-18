@@ -64,6 +64,13 @@ Autonode 的原则是 **稳定优先于快**：
 
 Clash Verge / ClashX / Stash / Clash for Windows / mihomo —— 通过 `external-controller` 通信，自动探测 unix socket 或 TCP 端口。
 
+## 安全
+
+- 控制台只监听 `127.0.0.1`，校验 `Host`/`Origin`，防止 CSRF 与 DNS rebinding
+- 订阅内容一律转义后渲染，避免机场侧注入脚本
+- 更新下载限制在 GitHub 域名，安装前需管理员授权
+- 完整自查报告：[docs/SECURITY.md](docs/SECURITY.md)
+
 ## 数据与隐私
 
 全部本地运行：只读客户端接口，不上传数据。唯一网络请求是测速地址和你主动填写的订阅链接。

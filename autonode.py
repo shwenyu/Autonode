@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.2.0-beta.2"
+VERSION = "2.2.0-beta.3"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -365,12 +365,16 @@ def load_config():
     return cfg
 
 
+_CONFIG_LOCK = threading.RLock()
+
+
 def save_config(cfg):
-    os.makedirs(BASE_DIR, exist_ok=True)
-    tmp = CONFIG_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(cfg, fh, ensure_ascii=False, indent=2)
-    os.replace(tmp, CONFIG_FILE)
+    with _CONFIG_LOCK:
+        os.makedirs(BASE_DIR, exist_ok=True)
+        tmp = CONFIG_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(cfg, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, CONFIG_FILE)
 
 
 # AI 站点默认清单（用于一键预置分流规则）
@@ -1133,9 +1137,18 @@ def check_update():
     }
 
 
+ALLOWED_ASSET_HOSTS = ("github.com", "objects.githubusercontent.com",
+                       "github-releases.githubusercontent.com")
+
+
 def apply_update(asset_url, asset_name, mode="install"):
     if not asset_url or not asset_name:
         return {"ok": False, "error": "缺少下载地址"}
+    parsed = urllib.parse.urlparse(asset_url)
+    if parsed.scheme != "https" or parsed.netloc not in ALLOWED_ASSET_HOSTS:
+        return {"ok": False, "error": "下载地址不在允许的域名内"}
+    if not re.search(r"\.(pkg|zip)$", asset_name, re.I):
+        return {"ok": False, "error": "只接受 pkg / zip 附件"}
     dest_dir = os.path.join(os.path.expanduser("~"), "Downloads")
     os.makedirs(dest_dir, exist_ok=True)
     dest = os.path.join(dest_dir, os.path.basename(asset_name))
@@ -1244,11 +1257,19 @@ def service_control(action):
     if not label:
         return {"ok": False, "error": "找不到 LaunchAgent（可能不是用安装脚本装的）"}
     uid = os.getuid()
-    cmd = "sleep 1; launchctl bootout gui/%d/%s" % (uid, label)
-    if action == "restart":
-        cmd += "; sleep 1; launchctl bootstrap gui/%d %s" % (uid, shlex.quote(plist))
-    subprocess.Popen(["/bin/sh", "-c", cmd], start_new_session=True,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    domain = "gui/%d/%s" % (uid, label)
+    gui_domain = "gui/%d" % uid
+
+    def _run():
+        time.sleep(1.2)
+        subprocess.run(["launchctl", "bootout", domain],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+        if action == "restart":
+            time.sleep(1.2)
+            subprocess.run(["launchctl", "bootstrap", gui_domain, plist],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+
+    threading.Thread(target=_run, daemon=True).start()
     return {"ok": True, "label": label, "action": action}
 
 
@@ -1926,9 +1947,17 @@ class Engine(object):
                         "keep_factor", "keep_offset_ms", "max_workers", "test_url",
                         "verify_url", "verify_top", "timeout_ms", "regions",
                         "verify_mode", "verify_good_ms", "manual_hold_seconds", "role"):
-                if key in patch:
+                if key not in patch:
+                    continue
+                try:
                     g[key] = patch[key]
-            g = _normalize_group(g)
+                    _normalize_group(dict(g))   # 先校验能否归一化
+                except Exception:
+                    g.pop(key, None)
+            try:
+                g = _normalize_group(g)
+            except Exception:
+                continue
             for i, item in enumerate(cfg["groups"]):
                 if item["id"] == gid:
                     cfg["groups"][i] = g
@@ -2561,7 +2590,7 @@ el('newgroupbtn').onclick = function(){
   get('/api/proxies').then(function(d){
     el('ng-members').innerHTML = (d.proxies||[]).map(function(n){
       var q = String(n).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
-      return '<option value="'+q+'">'+n+'</option>';
+      return '<option value="'+q+'">'+esc(n)+'</option>';
     }).join('');
   });
 };
@@ -2642,6 +2671,13 @@ function notify(msg){
   toastTimer = setTimeout(function(){ t.hidden = true; }, 2400);
 }
 
+function esc(v){
+  return String(v == null ? '' : v)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function fmtBytes(n){
   n = n || 0;
   if(n > 1048576) return (n/1048576).toFixed(1) + ' MB';
@@ -2655,7 +2691,7 @@ function fillProcTargets(){
   var keep = sel.value;
   sel.innerHTML = RT_TARGETS.map(function(t){
     var q = String(t).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
-    return '<option value="'+q+'">'+t+'</option>';
+    return '<option value="'+q+'">'+esc(t)+'</option>';
   }).join('');
   if(keep && RT_TARGETS.indexOf(keep) >= 0){ sel.value = keep; return; }
   var ai = RT_TARGETS.filter(function(t){ return /(^|[^A-Za-z])AI([^A-Za-z]|$)/i.test(t); })[0];
@@ -2670,9 +2706,9 @@ function renderProcRules(){
     var idx = ROUTES.indexOf(r);
     var opts = RT_TARGETS.map(function(t){
       var q = String(t).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
-      return '<option value="'+q+'"'+(t===r.target?' selected':'')+'>'+t+'</option>';
+      return '<option value="'+q+'"'+(t===r.target?' selected':'')+'>'+esc(t)+'</option>';
     }).join('');
-    return '<tr><td class="mono">'+r.value+'</td><td><select data-proct="'+idx+'" style="width:100%">'+opts+'</select></td>'
+    return '<tr><td class="mono">'+esc(r.value)+'</td><td><select data-proct="'+idx+'" style="width:100%">'+opts+'</select></td>'
       + '<td><button data-procdel="'+idx+'">删</button></td></tr>';
   }).join('') || '<tr><td colspan="3" class="muted">还没有进程规则</td></tr>';
 }
@@ -2716,12 +2752,12 @@ function loadApps(){
       var out = outs.length ? (outs[0] + (outs.length > 1 ? ' 等' + outs.length + '个' : '')) : '-';
       var cls = '';
       var outColor = /DIRECT/i.test(out) ? 'var(--text-3)' : 'var(--text)';
-      return '<tr><td><div class="mono">'+a.name+'</div>'
-        + '<div class="muted" style="font-size:11px">'+((a.hosts||[])[0]||'')+'</div></td>'
+      return '<tr><td><div class="mono">'+esc(a.name)+'</div>'
+        + '<div class="muted" style="font-size:11px">'+esc((a.hosts||[])[0]||'')+'</div></td>'
         + '<td>'+a.conns+'</td><td>'+(sysMode ? '<span class="muted">—</span>' : fmtBytes(a.download)+' ↓')+'</td>'
-        + '<td class="muted" style="font-size:12px">'+(sysMode ? ((a.hosts||[]).join(' · ')||'-') : ((a.rules||[])[0]||'-'))+'</td>'
+        + '<td class="muted" style="font-size:12px">'+esc(sysMode ? ((a.hosts||[]).join(' · ')||'-') : ((a.rules||[])[0]||'-'))+'</td>'
         + '<td>' + (sysMode ? '<span class="muted">—</span>'
-            : '<span class="badge '+cls+'" style="white-space:nowrap;color:'+outColor+'">'+out+'</span>') + '</td>'
+            : '<span class="badge '+cls+'" style="white-space:nowrap;color:'+outColor+'">'+esc(out)+'</span>') + '</td>'
         + '<td><button class="ghost" data-apprule="'+q+'" style="white-space:nowrap">＋规则</button></td></tr>';
     }).join('') || '<tr><td colspan="6" class="muted">当前没有带进程信息的连接</td></tr>';
 
@@ -2829,7 +2865,7 @@ function renderSubs(d){
     var q = String(it.uid).replace(/"/g, '&quot;');
     var act = isCur ? '<span class="muted">使用中</span>'
       : '<button data-sub-act="' + q + '">切换</button>';
-    return '<tr><td>' + it.name + '</td>'
+    return '<tr><td>' + esc(it.name) + '</td>'
       + '<td>' + (isCur ? '<span class="badge ok">当前</span>' : '') + '</td>'
       + '<td class="muted">' + (used ? (used / 1073741824).toFixed(1) : '0') + ' / '
       + (it.total ? Math.round(it.total / 1073741824) : '—') + ' GB</td>'
@@ -2884,8 +2920,8 @@ function loadOverview(){
       var gs = d.groups || [];
       el('ov-groups').innerHTML = gs.map(function(g){
         return '<div style="margin-bottom:12px">'
-          + '<div class="muted" style="font-size:12px">'+g.label+'</div>'
-          + '<div class="big">'+(g.current || '—')+'</div>'
+          + '<div class="muted" style="font-size:12px">'+esc(g.label)+'</div>'
+          + '<div class="big">'+esc(g.current || '—')+'</div>'
           + '<div class="muted" style="font-size:12px">'
           + (g.current_ms ? g.current_ms + ' ms' : '延迟未知') + ' · 上次 ' + (g.last_run || '—') + '</div></div>';
       }).join('') || '<div class="muted">还没有纳管分组</div>';
@@ -2919,7 +2955,7 @@ function loadOverview(){
       var cur = sel.value;
       sel.innerHTML = (d.groups || []).map(function(g){
         var q = String(g.id).replace(/"/g, '&quot;');
-        return '<option value="'+q+'">'+g.label+'</option>';
+        return '<option value="'+q+'">'+esc(g.label)+'</option>';
       }).join('');
       if(cur) sel.value = cur;
       sel.disabled = false;
@@ -3146,7 +3182,7 @@ function loadVpns(){
                     : '<button data-vpn="connect" data-name="'+q+'">连接</button>';
       }
       var keepCell = (v.managed === false) ? '-' : '<input type="checkbox" data-keep="'+q+'"'+(on2?' checked':'')+'>';
-      return '<tr><td>'+v.name+'</td><td class="muted">'+v.proto+'</td>'
+      return '<tr><td>'+esc(v.name)+'</td><td class="muted">'+esc(v.proto)+'</td>'
         + '<td><span class="badge '+st[1]+'">'+st[0]+'</span></td>'
         + '<td>'+keepCell+'</td><td>'+action+'</td></tr>';
     }).join('');
@@ -3177,9 +3213,9 @@ function loadVpns(){
         el('ent-body').innerHTML = ents.map(function(a){
           var q = String(a.name).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
           var b = String(a.bundle || '').replace(/"/g,'&quot;');
-          return '<tr><td>'+a.name+'</td>'
+          return '<tr><td>'+esc(a.name)+'</td>'
             + '<td><span class="badge '+(a.running?'ok':'')+'">'+(a.running?'运行中':'未运行')+'</span></td>'
-            + '<td class="mono muted">'+((a.ports||[]).join(', ')||'—')+'</td>'
+            + '<td class="mono muted">'+esc((a.ports||[]).join(', ')||'—')+'</td>'
             + '<td><button data-vpn-open data-bundle="'+b+'" data-name="'+q+'">打开</button></td></tr>';
         }).join('');
       }
@@ -3332,7 +3368,7 @@ function groupCard(g){
     + '<div class="ghd"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
     + '<button class="iconbtn" data-act="collapse" title="收起/展开">'
     + '<svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>'
-    + '<span class="gname">'+g.label+'</span> <span class="badge" data-role="role" style="display:none"></span>'
+    + '<span class="gname">'+esc(g.label)+'</span> <span class="badge" data-role="role" style="display:none"></span>'
     + ' <span class="gsum" data-role="summary"></span></div>'
     + '<div class="row"><button data-act="run">立即检测</button>'
     + '<button data-act="toggle" class="ghost">暂停</button>'
@@ -3468,7 +3504,7 @@ function updateGroups(s){
     card.querySelector('[data-role="msg"]').textContent = d.message || '-';
     var rows = (st.candidates||[]).map(function(c){
       var q = c.name.replace(/"/g,'&quot;');
-      return '<tr><td class="mono">'+c.name+'</td><td>'+c.region+'</td><td>'+c.ms+' ms</td><td>'
+      return '<tr><td class="mono">'+esc(c.name)+'</td><td>'+esc(c.region)+'</td><td>'+c.ms+' ms</td><td>'
         + (c.verify_ms? c.verify_ms+' ms':'-') + '</td>'
         + '<td><button data-act="switch" data-node="'+q+'">切换</button></td></tr>';
     }).join('');
@@ -3577,13 +3613,13 @@ function renderRoutes(d){
   el('rt').innerHTML = (ROUTES||[]).map(function(r,i){
     var opts = RT_TARGETS.map(function(t){
       var q = String(t).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
-      return '<option value="'+q+'"'+(t === r.target ? ' selected' : '')+'>'+t+'</option>';
+      return '<option value="'+q+'"'+(t === r.target ? ' selected' : '')+'>'+esc(t)+'</option>';
     }).join('');
     var bad = RT_TARGETS.indexOf(r.target) < 0;
     var tgt = bad
       ? r.target + ' <span class="badge bad">缺失</span>'
       : r.target;
-    return '<tr><td>'+r.type+'</td><td class="mono">'+r.value+'</td>'
+    return '<tr><td>'+esc(r.type)+'</td><td class="mono">'+esc(r.value)+'</td>'
       + '<td><select data-rtt="'+i+'" style="width:100%">'+opts+'</select>'
       + (bad ? '<div class="muted" style="font-size:11px;margin-top:3px">当前订阅没有这个分组</div>' : '')
       + '</td>'
@@ -3666,7 +3702,7 @@ function fillSiteGroups(s){
   var cur=sel.value;
   sel.innerHTML=(s.groups||[]).map(function(g){
     var q=String(g.id).replace(/"/g,'&quot;');
-    return '<option value="'+q+'">'+g.label+'</option>';
+    return '<option value="'+q+'">'+esc(g.label)+'</option>';
   }).join('');
   if(cur) sel.value=cur;
 }
@@ -3682,7 +3718,7 @@ function pollSite(){
     var rows=(s.results||[]).map(function(x){
       var ok=x.ms?'<span style="color:var(--ok)">'+x.ms+' ms</span>':'<span style="color:var(--bad)">打不开</span>';
       var q=x.name.replace(/"/g,'&quot;');
-      return '<tr><td class="mono">'+x.name+'</td><td>'+ok+'</td>'
+      return '<tr><td class="mono">'+esc(x.name)+'</td><td>'+ok+'</td>'
         + '<td><button data-site-switch="'+q+'">切换</button></td></tr>';
     }).join('');
     el('site-res').innerHTML = rows?('<table><thead><tr><th>节点</th><th>结果</th><th style="width:62px"></th></tr></thead><tbody>'+rows+'</tbody></table>'):'';
@@ -3778,10 +3814,32 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
         self.end_headers()
         self.wfile.write(body)
 
+    def _guard(self):
+        """限制为本地控制台所需的最小暴露面。"""
+        host = (self.headers.get("Host") or "").strip()
+        port = str(self.server.server_address[1]) if getattr(self, "server", None) else ""
+        allowed = {"127.0.0.1:%s" % port, "localhost:%s" % port, "[::1]:%s" % port}
+        if host and host not in allowed:
+            self._send(403, json.dumps({"error": "forbidden host"}))
+            return False
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin:
+            ok_origin = ("http://127.0.0.1:%s" % port, "http://localhost:%s" % port,
+                         "http://[::1]:%s" % port)
+            if origin not in ok_origin:
+                self._send(403, json.dumps({"error": "forbidden origin"}))
+                return False
+        return True
+
     def do_GET(self):
+        if not self._guard():
+            return
         path = urllib.parse.urlparse(self.path).path
         eng = self.engine
         if path in ("/", "/index.html"):
@@ -4042,8 +4100,17 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, json.dumps({"error": "not found"}))
 
     def do_POST(self):
+        if not self._guard():
+            return
         path = urllib.parse.urlparse(self.path).path
-        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            self._send(400, json.dumps({"error": "bad content-length"}))
+            return
+        if length < 0 or length > 1024 * 1024:
+            self._send(413, json.dumps({"error": "payload too large"}))
+            return
         raw = self.rfile.read(length) if length else b"{}"
         try:
             payload = json.loads(raw.decode("utf-8") or "{}")
@@ -4117,11 +4184,29 @@ class Handler(BaseHTTPRequestHandler):
                 fh.write(data)
             os.chmod(out, 0o600)
             subprocess.run(["open", out], capture_output=True)
+
+            def _cleanup(path):
+                time.sleep(90)
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except OSError:
+                    pass
+
+            threading.Thread(target=_cleanup, args=(out,), daemon=True).start()
             log("[VPN] 已生成配置描述文件：%s（等待系统确认安装）" % out)
             return self._send(200, json.dumps({"ok": True, "file": out}, ensure_ascii=False))
         if path == "/api/vpn/open":
             bundle = str(payload.get("bundle") or "").strip()
             name = str(payload.get("name") or "").strip()
+            allowed = {app["bundle"] for app in ENTERPRISE_VPNS}
+            for v in list_system_vpns():
+                if v.get("bundle"):
+                    allowed.add(v["bundle"])
+            if bundle and bundle not in allowed:
+                return self._send(400, json.dumps({"ok": False, "error": "未知应用"}, ensure_ascii=False))
+            if not bundle and not name:
+                return self._send(400, json.dumps({"ok": False, "error": "缺少应用标识"}, ensure_ascii=False))
             try:
                 if bundle:
                     subprocess.Popen(["open", "-b", bundle])
