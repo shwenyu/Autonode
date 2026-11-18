@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "3.0.0-alpha.4"
+VERSION = "3.0.0-alpha.5"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -2651,6 +2651,9 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
       <button class="navhead" data-toggle="observe">观察
         <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
       <div class="navsub">
+        <button data-nav="path">
+          <svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2.2"/><circle cx="19" cy="12" r="2.2"/><path d="M7.2 12h9.6"/></svg>
+          流量路径</button>
         <button data-nav="apps">
           <svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M3.5 9h17"/></svg>
           连接与应用</button>
@@ -2700,35 +2703,11 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
     </div>
   </div>
 
-  <div class="card">
-    <div class="row" style="justify-content:space-between">
-      <h2 style="margin:0">流量路径</h2>
-      <div class="row" style="gap:6px">
-        <input id="path-input" placeholder="域名、URL 或进程名，如 openai.com" style="width:260px">
-        <button class="primary" id="path-run">解析</button>
-      </div>
-    </div>
-    <div id="path-result" style="margin-top:14px"></div>
-  </div>
-
   <div class="kpis">
     <div class="kpi"><div class="klabel">Clash 客户端</div><div class="kval" id="ov-ctl">—</div><div class="kfoot" id="ov-ctl-foot">—</div></div>
     <div class="kpi"><div class="klabel">混合端口</div><div class="kval" id="ov-port">—</div><div class="kfoot">本地代理入口</div></div>
     <div class="kpi"><div class="klabel">连接数</div><div class="kval" id="ov-conns">—</div><div class="kfoot">内核活动连接</div></div>
     <div class="kpi"><div class="klabel">延迟</div><div class="kval" id="ov-delay">—</div><div class="kfoot" id="ov-delay-foot">点击测速</div></div>
-  </div>
-
-  <div class="card">
-    <div class="row" style="justify-content:space-between">
-      <h2 style="margin:0">稳定性测速</h2>
-      <div class="row"><select id="ov-group" style="width:170px"></select>
-        <select id="ov-node" style="width:190px"><option value="">当前节点</option></select>
-        <button class="primary" id="ov-test">开始测速</button></div>
-    </div>
-    <div class="row" style="margin-top:16px;gap:12px">
-      <span id="ov-result" style="font-size:15px;font-weight:500;color:var(--text-3)">未测速</span>
-      <span id="ov-stab" class="badge" hidden></span>
-    </div>
   </div>
 
   <div class="card">
@@ -2819,6 +2798,32 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
     </div>
     <div class="muted" id="site-msg" style="margin-top:8px">未运行</div>
     <div id="site-res" style="margin-top:10px"></div>
+  </div>
+</section>
+
+<section id="sec-path" hidden>
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">流量路径</h2>
+      <div class="row" style="gap:6px">
+        <input id="path-input" placeholder="域名、URL 或进程名，如 openai.com" style="width:260px">
+        <button class="primary" id="path-run">解析</button>
+      </div>
+    </div>
+    <div id="path-result" style="margin-top:14px"></div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">稳定性测速</h2>
+      <div class="row"><select id="ov-group" style="width:170px"></select>
+        <select id="ov-node" style="width:190px"><option value="">当前节点</option></select>
+        <button class="primary" id="ov-test">开始测速</button></div>
+    </div>
+    <div class="row" style="margin-top:16px;gap:12px">
+      <span id="ov-result" style="font-size:15px;font-weight:500;color:var(--text-3)">未测速</span>
+      <span id="ov-stab" class="badge" hidden></span>
+    </div>
   </div>
 </section>
 
@@ -2984,7 +2989,7 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
 </div>
 <script>
 var STATUS=null, CTL={}, ROUTES=[], RT_TARGETS=[], SITE={}, NAV='overview';
-var TITLES = {overview:'概览', groups:'分组与选优', routes:'分流规则', sub:'订阅', site:'站点诊断', vpn:'系统 VPN', apps:'连接与应用', tun:'TUN'};
+var TITLES = {overview:'概览', groups:'分组与选优', routes:'分流规则', sub:'订阅', site:'站点诊断', vpn:'系统 VPN', apps:'连接与应用', path:'流量路径', tun:'TUN'};
 var PROVIDERS=[];
 
 function loadProviders(){
@@ -3018,7 +3023,7 @@ document.querySelectorAll('[data-nav]').forEach(function(b){
     var pt = el('pagetitle'); if(pt) pt.textContent = TITLES[NAV] || '';
     if(location.hash !== '#' + NAV){ try{ history.replaceState(null,'','#'+NAV); }catch(e){} }
     document.querySelectorAll('[data-nav]').forEach(function(x){ x.classList.toggle('on', x===b); });
-    ['overview','groups','routes','sub','site','vpn','apps','tun'].forEach(function(n){ el('sec-'+n).hidden = (n!==NAV); });
+    ['overview','groups','routes','sub','site','vpn','apps','tun','path'].forEach(function(n){ el('sec-'+n).hidden = (n!==NAV); });
     if(NAV==='overview') loadOverview();
     if(NAV==='routes'){ loadRoutes(); loadTun(); }
     if(NAV==='site' && STATUS) fillSiteGroups(STATUS);
@@ -3026,6 +3031,7 @@ document.querySelectorAll('[data-nav]').forEach(function(b){
     if(NAV==='sub') loadSubs();
     if(NAV==='tun'){ loadTun(); loadRoutes(); }
     if(NAV==='apps'){ loadRoutes(); loadApps(); }
+    if(NAV==='path'){ loadOverview(); }
   };
 });
 
@@ -3930,6 +3936,7 @@ function groupCard(g){
     + '<button data-act="toggle" class="ghost">暂停</button>'
     + '<button data-act="remove" class="ghost">停止纳管</button></div></div>'
     + '<div class="gbody">'
+    + '<div class="muted" data-role="scope" style="margin-top:8px;font-size:11.5px"></div>'
     + '<div class="grid" style="margin-top:14px">'
     + '<div><div class="muted">当前节点</div><div class="big mono" data-role="current">-</div>'
     + '<div class="muted" data-role="meta">-</div><div class="muted" data-role="last">-</div></div>'
@@ -3975,6 +3982,24 @@ function applyCollapse(card, gid){
   if(!card) return;
   var map = collapsedMap();
   card.classList.toggle('collapsed', !!map[gid]);
+}
+
+function loadGroupScope(card, gid){
+  var box = card.querySelector('[data-role="scope"]');
+  if(!box) return;
+  get('/api/group/scope?id=' + encodeURIComponent(gid)).then(function(d){
+    if(!d || !d.ok) return;
+    var parts = ['影响范围：直接规则 ' + d.directRules];
+    if(d.delegateCount){
+      parts.push('委托分组 ' + d.delegateCount
+        + '（' + (d.delegates || []).slice(0, 3).join('、')
+        + (d.delegateCount > 3 ? '…' : '') + '）');
+    }
+    if((d.ruleSamples || []).length){
+      parts.push('例：' + d.ruleSamples[0]);
+    }
+    box.textContent = parts.join(' · ');
+  }).catch(function(){});
 }
 
 function loadRegionStat(card, gid){
@@ -4055,6 +4080,7 @@ function renderGroups(s){
       fillGroupForm(card, g);
       applyCollapse(card, g.id);
       loadRegionStat(card, g.id);
+      loadGroupScope(card, g.id);
     });
   }
 }
@@ -4437,6 +4463,31 @@ class Handler(BaseHTTPRequestHandler):
                 tail = "（暂无日志）"
             page = PAGE.replace("<!--LOGTAIL-->", html.escape(tail or "（暂无日志）"))
             return self._send(200, page, "text/html; charset=utf-8")
+        if path == "/api/group/scope":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            gid = (qs.get("id") or [""])[0]
+            runner = eng.runners.get(gid)
+            if runner is None:
+                return self._send(404, json.dumps({"ok": False, "error": "分组不存在"},
+                                                  ensure_ascii=False))
+            name = runner.cfg.get("group", "")
+            ctx = controller_ctx(eng.cfg)
+            try:
+                rules = api(ctx, "GET", "/rules", timeout=10).get("rules") or []
+                proxies = api(ctx, "GET", "/proxies", timeout=10).get("proxies") or {}
+            except Exception as exc:
+                return self._send(200, json.dumps({"ok": False, "error": str(exc)},
+                                                  ensure_ascii=False))
+            direct = [r for r in rules if r.get("proxy") == name]
+            delegates = [n for n, p in proxies.items()
+                         if p.get("type") in ("Selector", "URLTest", "Fallback", "LoadBalance")
+                         and p.get("now") == name and n != name]
+            samples = ["%s %s" % (r.get("type"), r.get("payload") or "") for r in direct[:3]]
+            return self._send(200, json.dumps({
+                "ok": True, "group": name,
+                "directRules": len(direct), "ruleSamples": samples,
+                "delegateCount": len(delegates), "delegates": delegates[:8],
+            }, ensure_ascii=False))
         if path == "/api/path":
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             target = (qs.get("target") or [""])[0]
