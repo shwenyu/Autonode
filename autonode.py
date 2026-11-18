@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "3.0.0-alpha.6"
+VERSION = "3.0.0-alpha.7"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -1610,15 +1610,26 @@ def service_control(action):
     uid = os.getuid()
     domain = "gui/%d/%s" % (uid, label)
     gui_domain = "gui/%d" % uid
+    record_op("service", action, {"label": label})
 
     def _run():
         time.sleep(1.2)
+        if action == "restart":
+            r = subprocess.run(["launchctl", "kickstart", "-k", domain],
+                               capture_output=True, timeout=20)
+            if r.returncode == 0:
+                log("[服务] 已通过 kickstart 重启")
+                return
+            log("[服务] kickstart 失败（rc=%d），尝试 bootstrap" % r.returncode)
+            b = subprocess.run(["launchctl", "bootstrap", gui_domain, plist],
+                               capture_output=True, timeout=25)
+            if b.returncode == 0:
+                log("[服务] 已通过 bootstrap 启动")
+            else:
+                log("[服务] bootstrap 失败：%s" % (b.stderr or b"")[:160].decode("utf-8", "ignore"))
+            return
         subprocess.run(["launchctl", "bootout", domain],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
-        if action == "restart":
-            time.sleep(1.2)
-            subprocess.run(["launchctl", "bootstrap", gui_domain, plist],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
 
     threading.Thread(target=_run, daemon=True).start()
     return {"ok": True, "label": label, "action": action}
@@ -2678,7 +2689,6 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
     <h1 id="pagetitle">概览</h1>
     <div class="row">
       <button id="updatebtn" class="primary" style="display:none">更新</button>
-      <button id="refreshbtn" class="ghost">刷新</button>
       <button id="helpbtn" class="ghost">帮助</button>
       <button id="logbtn" class="ghost">日志</button>
       <button id="restartbtn" class="ghost">重启服务</button>
@@ -3910,10 +3920,19 @@ el('quitbtn').onclick = function(){
 };
 
 el('restartbtn').onclick = function(){
-  askModal('重启后台服务', '页面会断开几秒，之后刷新即可重连。', '重启', function(){
+  askModal('重启服务', '会重启后台服务并自动刷新页面，约 5 秒。', '重启', function(){
     post('/api/service',{action:'restart'}).then(function(r){
       if(!r.ok){ notify('重启失败：' + (r.error || '')); return; }
       el('state').textContent = '重启中…';
+      var tries = 0;
+      var timer = setInterval(function(){
+        tries++;
+        fetch('/api/status', {cache:'no-store'}).then(function(){
+          clearInterval(timer); location.reload();
+        }).catch(function(){
+          if(tries > 20){ clearInterval(timer); notify('重启超时，请重新打开应用'); }
+        });
+      }, 1000);
     });
   });
 };

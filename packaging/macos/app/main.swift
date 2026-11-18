@@ -60,10 +60,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         failures += 1
         if failures == 3 {
             let html = """
-            <html><body style="background:#0f1115;color:#8b93a7;font:14px -apple-system;padding:60px;text-align:center">
+            <html><head><meta http-equiv="refresh" content="3;url=http://127.0.0.1:8765/"></head>
+            <body style="background:#0f1115;color:#8b93a7;font:14px -apple-system;padding:60px;text-align:center">
             <h2 style="color:#e6e9ef">连不上 Autonode 服务</h2>
-            <p>后台服务可能没有运行。</p>
-            <p>在终端执行：<br><code style="color:#4c8dff">launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.autonode.plist</code></p>
+            <p>后台服务可能没有运行，每 3 秒会自动重试。</p>
+            <p><button onclick="location.href='http://127.0.0.1:8765/'" style="padding:8px 18px;border-radius:8px;border:1px solid #2a2f3a;background:#1a1e26;color:#e6e9ef;font-size:13px">立即重试</button></p>
+            <p>仍无法连接时，在终端执行：<br><code style="color:#4c8dff">launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.autonode.plist</code></p>
             <p>或重新运行安装包。</p>
             </body></html>
             """
