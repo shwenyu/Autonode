@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "3.0.0-alpha.1"
+VERSION = "3.0.0-alpha.2"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -2513,20 +2513,20 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
     <h2>分流规则</h2>
     <table><thead><tr><th style="width:150px">匹配方式</th><th>值</th><th style="width:190px">走向</th><th style="width:52px"></th></tr></thead>
     <tbody id="rt"></tbody></table>
-    <div class="row" style="margin-top:10px">
-      <select id="rt-type" style="width:150px">
+    <div class="row" style="margin-top:10px;gap:8px;flex-wrap:nowrap">
+      <select id="rt-type" style="width:132px;flex:none">
         <option value="DOMAIN-SUFFIX">域名后缀</option>
         <option value="DOMAIN">完整域名</option>
         <option value="DOMAIN-KEYWORD">域名关键词</option>
         <option value="IP-CIDR">IP 段</option>
         <option value="PROCESS-NAME">进程名</option>
       </select>
-      <input id="rt-value" placeholder="example.com" style="flex:1">
-      <select id="rt-target" style="width:190px"></select>
+      <input id="rt-value" placeholder="example.com" style="flex:1;min-width:140px">
+      <select id="rt-target" style="width:150px"></select>
       <button id="rt-add">添加</button>
-      <button id="rt-ai" class="ghost">导入 AI 站点规则</button>
+      <button id="rt-ai" class="ghost">AI 预设</button>
       <button id="rt-save">保存草稿</button>
-      <button class="primary" id="rt-apply">应用（重启内核）</button>
+      <button class="primary" id="rt-apply">应用并重启</button>
     </div>
     <div class="muted" id="rt-msg" style="margin-top:8px"></div>
   </div>
