@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "3.0.0-alpha.2"
+VERSION = "3.0.0-alpha.3"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -820,6 +820,137 @@ def switch_subscription(engine, uid):
                    capture_output=True)
     record_op("subscription", "activated", {"uid": uid})
     return {"ok": True, "uid": uid}
+
+
+def _norm_target(q):
+    q = (q or "").strip()
+    if "://" in q:
+        try:
+            q = urllib.parse.urlparse(q).hostname or q
+        except Exception:
+            pass
+    return q.strip("/").lower()
+
+
+def _chain_of(proxies, name, depth=0):
+    p = proxies.get(name)
+    if not p or depth > 6:
+        return [name]
+    if p.get("type") in ("Selector", "URLTest", "Fallback", "LoadBalance"):
+        now = p.get("now")
+        if not now or now == name:
+            return [name]
+        return [name] + _chain_of(proxies, now, depth + 1)
+    return [name]
+
+
+def resolve_path(engine, target):
+    """给定域名/URL/进程名，解析它实际会走哪条规则、哪个分组、哪个节点。"""
+    host = _norm_target(target)
+    if not host:
+        return {"ok": False, "error": "缺少目标"}
+    ctx = controller_ctx(engine.cfg)
+    if not (ctx.get("unix") or ctx.get("host")):
+        return {"ok": False, "error": "控制器不可用"}
+    try:
+        rules = api(ctx, "GET", "/rules", timeout=10).get("rules") or []
+        proxies = api(ctx, "GET", "/proxies", timeout=10).get("proxies") or {}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+    is_proc = ("." not in host) and ("/" not in host) and (" " not in host)
+    matched = None
+    for i, r in enumerate(rules):
+        typ = (r.get("type") or "")
+        payload = (r.get("payload") or "").strip().lower()
+        hit = False
+        if is_proc:
+            if typ in ("ProcessName", "PROCESS-NAME") and payload == host:
+                hit = True
+            elif typ in ("Match", "MATCH"):
+                hit = True
+        else:
+            if typ in ("Domain", "DOMAIN"):
+                hit = payload == host
+            elif typ in ("DomainSuffix", "DOMAIN-SUFFIX"):
+                hit = host == payload or host.endswith("." + payload)
+            elif typ in ("DomainKeyword", "DOMAIN-KEYWORD"):
+                hit = payload in host
+            elif typ in ("Match", "MATCH"):
+                hit = True
+        if hit:
+            matched = {"index": i + 1, "type": r.get("type"),
+                       "payload": r.get("payload"), "proxy": r.get("proxy")}
+            break
+
+    if not matched:
+        return {"ok": True, "target": host, "isProcess": is_proc,
+                "totalRules": len(rules), "matched": None,
+                "steps": [], "risk": "unknown"}
+
+    outbound = matched["proxy"]
+    chain = _chain_of(proxies, outbound)
+    node = chain[-1] if chain else outbound
+    ptype = (proxies.get(outbound) or {}).get("type", "")
+
+    # 本地纳管信息
+    managed = None
+    for g in engine.cfg.get("groups") or []:
+        if g.get("group") == outbound:
+            managed = g
+            break
+
+    # 影响范围：指向该出口的规则数 + 委托给它的分组
+    direct_rules = sum(1 for r in rules if r.get("proxy") == outbound)
+    delegates = [n for n, p in proxies.items()
+                 if p.get("type") in ("Selector", "URLTest", "Fallback", "LoadBalance")
+                 and p.get("now") == outbound and n != outbound]
+
+    # IP 波动评估：看整条链路里每个分组的控制方式
+    managed_by_name = {g.get("group"): g for g in (engine.cfg.get("groups") or [])}
+    sticky_hit = ""
+    switchy_hit = ""
+    auto_hit = ""
+    for name in chain:
+        if name in managed_by_name:
+            role = managed_by_name[name].get("role")
+            if role == "ai":
+                sticky_hit = sticky_hit or name
+            else:
+                switchy_hit = switchy_hit or name
+        pi = proxies.get(name) or {}
+        if pi.get("type") in ("URLTest", "Fallback", "LoadBalance"):
+            auto_hit = auto_hit or name
+
+    if outbound in ("DIRECT", "REJECT"):
+        risk, reason = "low", "直连/拒绝，不经代理节点，IP 随本地网络"
+    elif auto_hit:
+        risk, reason = "high", "链路中的 <%s> 由内核自动更换成员，出口 IP 会波动" % auto_hit
+    elif switchy_hit:
+        risk, reason = "high", "链路中的 <%s> 使用延迟择优，节点被换时出口 IP 会变化" % switchy_hit
+    elif sticky_hit:
+        risk, reason = "low", "链路中的 <%s> 为粘滞策略，验证通过不换节点" % sticky_hit
+    elif delegates:
+        risk, reason = "medium", "被 %d 个分组委托，任一组改选都会改变出口" % len(delegates)
+    elif ptype == "Selector":
+        risk, reason = "medium", "手动选择型但未纳管，客户端内改选会改变出口"
+    else:
+        risk, reason = "medium", "出口类型 %s，需人工确认稳定性" % (ptype or "未知")
+
+    return {
+        "ok": True, "target": host, "isProcess": is_proc,
+        "totalRules": len(rules), "matched": matched,
+        "outbound": outbound, "outboundType": ptype,
+        "chain": chain, "node": node,
+        "managed": bool(managed),
+        "role": (managed or {}).get("role"),
+        "holdSeconds": (managed or {}).get("manual_hold_seconds"),
+        "directRules": direct_rules,
+        "delegateCount": len(delegates),
+        "delegates": delegates[:8],
+        "risk": risk, "riskReason": reason,
+        "steps": [matched["type"] + " " + str(matched["payload"] or "")],
+    }
 
 
 def build_runtime(engine):
@@ -2279,6 +2410,14 @@ td{text-align:left;padding:12px 8px;border-bottom:1px solid var(--line-soft);ver
 tr:last-child td{border-bottom:0}
 tbody tr:hover td{background:#fbfcfd}
 
+.pathline{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.pstep{background:#f7f8fa;border-radius:9px;padding:7px 11px;font-size:12.5px;color:var(--text)}
+.pstep b{font-weight:600}
+.pstep.small{font-size:11.5px;color:var(--text-2)}
+.parrow{color:var(--text-3);opacity:.6;font-size:12px}
+.pathnote{margin-top:10px;font-size:11.5px;color:var(--text-3)}
+.pathrisk{margin-top:8px;font-size:12px}
+
 /* 其他 */
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
@@ -2458,6 +2597,17 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
         <span id="ov-vpn" class="badge">VPN —</span>
       </div>
     </div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">流量路径</h2>
+      <div class="row" style="gap:6px">
+        <input id="path-input" placeholder="域名、URL 或进程名，如 openai.com" style="width:260px">
+        <button class="primary" id="path-run">解析</button>
+      </div>
+    </div>
+    <div id="path-result" style="margin-top:14px"></div>
   </div>
 
   <div class="kpis">
@@ -3124,6 +3274,59 @@ function loadRuntime(force){
     if(bar) bar.innerHTML = bits.join('<span style="opacity:.35">·</span>');
   }).catch(function(){});
 }
+
+function renderPath(d){
+  var box = el('path-result');
+  if(!box) return;
+  if(!d.ok){
+    box.innerHTML = '<span class="muted">' + esc(d.error || '解析失败') + '</span>';
+    return;
+  }
+  if(!d.matched){
+    box.innerHTML = '<span class="muted">没有匹配的规则（可能未进入内核，或被 TUN 排除）</span>';
+    return;
+  }
+  var steps = [];
+  steps.push('<span class="pstep"><b>' + esc(d.target) + '</b></span>');
+  steps.push('<span class="parrow">→</span>');
+  steps.push('<span class="pstep">规则 #' + d.matched.index + ' · '
+    + esc(String(d.matched.type)) + ' ' + esc(String(d.matched.payload || '')) + '</span>');
+  (d.chain || []).forEach(function(name){
+    steps.push('<span class="parrow">→</span>');
+    steps.push('<span class="pstep">' + esc(name) + '</span>');
+  });
+
+  var riskCls = d.risk === 'low' ? 'ok' : (d.risk === 'high' ? 'bad' : 'warn');
+  var riskTxt = d.risk === 'low' ? 'IP 稳定' : (d.risk === 'high' ? 'IP 可能波动' : '需留意');
+  var note = '共 ' + d.totalRules + ' 条规则 · 命中第 ' + d.matched.index + ' 条，前 '
+    + (d.matched.index - 1) + ' 条未命中（已省略）';
+  var extra = '直接规则 ' + d.directRules + ' · 委托分组 ' + d.delegateCount;
+  if(d.isProcess) extra += ' · 进程规则';
+
+  box.innerHTML = '<div class="pathline">' + steps.join('') + '</div>'
+    + '<div class="pathnote">' + esc(note) + '<span style="opacity:.4"> · </span>' + esc(extra) + '</div>'
+    + '<div class="pathrisk"><span class="badge ' + riskCls + '">' + riskTxt + '</span> '
+    + '<span class="muted">' + esc(d.riskReason || '') + '</span></div>';
+}
+
+function runPath(){
+  var v = (el('path-input').value || '').trim();
+  if(!v) return;
+  el('path-result').innerHTML = '<span class="muted">解析中…</span>';
+  get('/api/path?target=' + encodeURIComponent(v)).then(renderPath).catch(function(){
+    el('path-result').innerHTML = '<span class="muted">请求失败</span>';
+  });
+}
+
+if(el('path-run')) el('path-run').onclick = runPath;
+
+(function(){
+  try {
+    var q = new URLSearchParams(location.search).get('target');
+    if(q && el('path-input')){ el('path-input').value = q; runPath(); }
+  } catch(e){}
+})();
+if(el('path-input')) el('path-input').onkeydown = function(e){ if(e.key === 'Enter') runPath(); };
 
 function loadOverview(){
   get('/api/overview').then(function(d){
@@ -4089,6 +4292,10 @@ class Handler(BaseHTTPRequestHandler):
                 tail = "（暂无日志）"
             page = PAGE.replace("<!--LOGTAIL-->", html.escape(tail or "（暂无日志）"))
             return self._send(200, page, "text/html; charset=utf-8")
+        if path == "/api/path":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            target = (qs.get("target") or [""])[0]
+            return self._send(200, json.dumps(resolve_path(eng, target), ensure_ascii=False))
         if path == "/api/v2/runtime":
             return self._send(200, json.dumps(build_runtime(eng), ensure_ascii=False))
         if path == "/api/v2/config":
