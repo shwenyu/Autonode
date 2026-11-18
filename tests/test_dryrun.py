@@ -37,7 +37,7 @@ def install_fakes(epoch_after=None):
         return ("dead-node", None,
                 [{"name": "good-node", "region": "日本", "priority": 0,
                   "ms": 100, "verify_ms": None}],
-                "verify-all-failed")
+                "verify-all-failed", 3)
 
     m.api = fake_api
     m.evaluate = fake_evaluate

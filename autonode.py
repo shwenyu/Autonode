@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.1.0-beta.2"
+VERSION = "2.1.1-beta.1"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -1321,7 +1321,7 @@ def evaluate(ctx, g):
                 for c in candidates:
                     if c["name"] == current:
                         c["verify_ms"] = cur_v
-                return current, delays.get(current), candidates, "current-good"
+                return current, delays.get(current), candidates, "current-good", len(targets)
             time.sleep(verify_gap)
 
         shortlist = candidates[:int(g["verify_top"])]
@@ -1342,9 +1342,9 @@ def evaluate(ctx, g):
             rest = [c for c in candidates if c not in shortlist]
             candidates = good + rest
         else:
-            return current, delays.get(current), candidates, "verify-all-failed"
+            return current, delays.get(current), candidates, "verify-all-failed", len(targets)
 
-    return current, delays.get(current), candidates, None
+    return current, delays.get(current), candidates, None, len(targets)
 
 
 def run_group(engine, g, dry_run=False, runner=None):
@@ -1358,7 +1358,7 @@ def run_group(engine, g, dry_run=False, runner=None):
         return res
 
     try:
-        current, current_ms, candidates, flag = evaluate(ctx, g)
+        current, current_ms, candidates, flag, total_nodes = evaluate(ctx, g)
     except Exception as exc:
         res.update(action="error", message=str(exc))
         log("[%s] 测速失败 %s" % (g["label"], exc))
@@ -1417,8 +1417,16 @@ def run_group(engine, g, dry_run=False, runner=None):
         log("[%s] %s" % (g["label"], msg))
         return res
 
-    if len(candidates) < int(g["min_healthy"]):
-        msg = "可用节点仅 %d 个（< %d），不切换" % (len(candidates), g["min_healthy"])
+    # 阈值按池子大小自适应：小订阅（<6 个）不应因为挂一个节点就永远不切
+    floor = int(g["min_healthy"])
+    if total_nodes:
+        floor = min(floor, max(1, total_nodes // 2))
+        if total_nodes <= 2:
+            floor = 1
+    current_dead = current_ms is None
+    if len(candidates) < floor and not (current_dead and candidates):
+        msg = "可用节点仅 %d 个（阈值 %d，共 %d），不切换" % (
+            len(candidates), floor, total_nodes or len(candidates))
         res.update(action="skip", message=msg)
         log("[%s] %s" % (g["label"], msg))
         return res
@@ -2247,7 +2255,7 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
     <div class="row" style="justify-content:space-between"><b>使用手册</b><button id="help-close" class="ghost">关闭</button></div>
     <div class="manual">
       <h3>概览</h3><p>显示当前出口、Clash 客户端状态与系统 VPN 隧道，可做 3 次串行延迟测量。没有 Clash 时自动切到「系统 VPN 模式」。</p>
-      <h3>分组</h3><p>从 Clash 客户端已有的分组里挑一个纳管。AI 通道角色的分组采用粘滞策略：验证通过就不换节点。</p>
+      <h3>分组</h3><p>从 Clash 客户端已有的分组里挑一个纳管。AI 通道分组采用粘滞策略：验证通过就不换节点。最少可用节点阈值会随节点池大小自动下调，小订阅不会被误判为"不可用"。</p>
       <h3>分流规则</h3><p>按域名 / IP 段 / 进程名决定走向。保存后点「保存并应用」会重启内核（仅 Clash Verge 支持）。TUN 关闭时进程规则不生效。</p>
       <h3>订阅</h3><p>粘贴订阅链接，先校验可访问性，再交给客户端导入。</p>
       <h3>站点诊断</h3><p>只在你点击时运行：串行测试哪些节点能打开目标站点，避免并发触发风控。</p>
