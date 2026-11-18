@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "3.0.0-alpha.5"
+VERSION = "3.0.0-alpha.6"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -2399,6 +2399,7 @@ PAGE = r"""<!doctype html>
   --shadow:0 1px 2px rgba(17,17,17,.04),0 4px 16px rgba(17,17,17,.04);
 }
 *{box-sizing:border-box}
+button{white-space:nowrap}
 [hidden]{display:none!important}
 html,body{height:100%}
 body{margin:0;background:var(--page);color:var(--text);
@@ -2754,9 +2755,7 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
       <input id="rt-value" placeholder="example.com" style="flex:1;min-width:140px">
       <select id="rt-target" style="width:150px"></select>
       <button id="rt-add">添加</button>
-      <button id="rt-ai" class="ghost">AI 预设</button>
-      <button id="rt-save">保存草稿</button>
-      <button class="primary" id="rt-apply">应用并重启</button>
+      <button class="primary" id="rt-apply">应用</button>
     </div>
     <div class="muted" id="rt-msg" style="margin-top:8px"></div>
   </div>
@@ -4246,33 +4245,6 @@ document.addEventListener('click', function(e){
   var b=t.closest('button[data-rtdel]');
   if(b){ ROUTES.splice(parseInt(b.dataset.rtdel,10),1); saveRoutes(); }
 });
-el('rt-ai').onclick = function(){
-  var target = el('rt-target').value || '';
-  if(!target || target === 'DIRECT' || target === 'REJECT'){
-    el('rt-msg').textContent = '先在「走向」里选一个分组（AI 规则不能导入到直连）';
-    return;
-  }
-  get('/api/presets/ai').then(function(d){
-    var have = {}; ROUTES.forEach(function(r){ have[r.type+'|'+r.value+'|'+r.target] = 1; });
-    var added = 0;
-    (d.domains||[]).forEach(function(dom){
-      var key = 'DOMAIN-SUFFIX|'+dom+'|'+target;
-      if(have[key]) return;
-      ROUTES.push({type:'DOMAIN-SUFFIX', value:dom, target:target}); added++;
-    });
-    saveRoutes().then(function(){
-      el('rt-msg').textContent = added ? ('已导入 '+added+' 条 AI 站点规则，点「保存并应用」生效')
-                                       : 'AI 站点规则已存在';
-    });
-  });
-};
-
-el('rt-save').onclick = function(){
-  post('/api/routes',{routes:ROUTES}).then(function(){
-    el('rt-msg').textContent = '草稿已保存（尚未应用）';
-  });
-};
-
 el('rt-apply').onclick = function(){
   if(CTL.kind !== 'unix'){ el('rt-msg').textContent='分流规则应用依赖 Clash Verge 的配置目录'; return; }
   el('rt-msg').textContent = '正在写入并重启内核…（约 15 秒）';
