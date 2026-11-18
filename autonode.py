@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.2.0-beta.1"
+VERSION = "2.2.0-beta.2"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -2249,7 +2249,8 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
   <div class="card">
     <div class="row" style="justify-content:space-between">
       <h2 style="margin:0">稳定性测速</h2>
-      <div class="row"><select id="ov-group" style="width:180px"></select>
+      <div class="row"><select id="ov-group" style="width:170px"></select>
+        <select id="ov-node" style="width:190px"><option value="">当前节点</option></select>
         <button class="primary" id="ov-test">开始测速</button></div>
     </div>
     <div class="row" style="margin-top:16px;gap:12px">
@@ -2922,7 +2923,8 @@ function loadOverview(){
       }).join('');
       if(cur) sel.value = cur;
       sel.disabled = false;
-      sel.onchange = function(){ renderOvResult(); };
+      sel.onchange = function(){ loadOvNodes(); renderOvResult(); };
+      loadOvNodes();
       renderOvResult();
     } else {
       el('ov-ctl').textContent = '无';
@@ -2941,7 +2943,25 @@ var OV_RESULT = {};
 
 function ovKey(){
   var gid = el('ov-group') ? el('ov-group').value : '';
-  return window.__ovClash ? (gid || '') : 'system';
+  var node = el('ov-node') ? el('ov-node').value : '';
+  return window.__ovClash ? ((gid || '') + '|' + (node || '@current')) : 'system';
+}
+
+function loadOvNodes(){
+  var gid = el('ov-group') ? el('ov-group').value : '';
+  var sel = el('ov-node');
+  if(!sel) return;
+  if(!window.__ovClash || !gid){ sel.innerHTML = '<option value="">当前节点</option>'; sel.disabled = true; return; }
+  get('/api/nodes?id=' + encodeURIComponent(gid)).then(function(d){
+    var opts = '<option value="">当前节点' + (d.now ? '（' + d.now + '）' : '') + '</option>';
+    opts += (d.nodes || []).map(function(n){
+      var q = String(n).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+      return '<option value="' + q + '">' + n + '</option>';
+    }).join('');
+    sel.innerHTML = opts;
+    sel.disabled = false;
+    renderOvResult();
+  }).catch(function(){});
 }
 
 function renderOvResult(){
@@ -2969,11 +2989,14 @@ if(el('ov-test')) el('ov-test').onclick = function(){
   var clash = !!window.__ovClash;
   var gid = el('ov-group').value;
   if(clash && !gid){ el('ov-result').textContent = '无可用分组'; return; }
+  var key = ovKey();
   el('ov-test').disabled = true;
   el('ov-result').textContent = '测速中…';
   el('ov-stab').hidden = true;
 
-  var url = clash ? ('/api/latency?id=' + encodeURIComponent(gid)) : '/api/net-latency';
+  var node = el('ov-node') ? el('ov-node').value : '';
+  var url = clash ? ('/api/latency?id=' + encodeURIComponent(gid)
+                     + (node ? '&node=' + encodeURIComponent(node) : '')) : '/api/net-latency';
   get(url).then(function(d){
     el('ov-test').disabled = false;
     if(!d.ok){
@@ -2986,7 +3009,7 @@ if(el('ov-test')) el('ov-test').onclick = function(){
     var stable = okCount === 3 && jitter <= Math.max(30, Math.round(avg * 0.25));
     var mid = okCount === 3 && jitter <= Math.max(80, Math.round(avg * 0.6));
 
-    OV_RESULT[ovKey()] = {
+    OV_RESULT[key] = {
       avg: avg || '—',
       label: stable ? '稳定' : (mid ? '一般' : '不稳定'),
       cls: stable ? 'ok' : (mid ? 'warn' : 'bad')
@@ -3830,12 +3853,13 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/latency":
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             gid = (qs.get("id") or [""])[0]
+            want = (qs.get("node") or [""])[0].strip()
             runner = eng.runners.get(gid)
             if runner is None:
                 return self._send(404, json.dumps({"ok": False, "error": "分组不存在"}, ensure_ascii=False))
             ctx = controller_ctx(eng.cfg)
             snap = runner.snapshot()
-            node = snap.get("current")
+            node = want or snap.get("current")
             if not node:
                 return self._send(200, json.dumps({"ok": False, "error": "当前没有节点"}, ensure_ascii=False))
             url = runner.cfg.get("test_url")
