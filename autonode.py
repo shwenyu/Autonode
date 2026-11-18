@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.2.0-beta.4"
+VERSION = "3.0.0-alpha.1"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -335,6 +335,66 @@ def _normalize_group(item):
     if not isinstance(cfg.get("regions"), list) or not cfg["regions"]:
         cfg["regions"] = ["日本", "新加坡", "美国"]
     return cfg
+
+
+STATE_DIR = os.path.join(BASE_DIR, "state")
+HEALTH_FILE = os.path.join(STATE_DIR, "sub_health.json")
+OPS_FILE = os.path.join(STATE_DIR, "operations.jsonl")
+
+
+def _ensure_state_dir():
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+    except OSError:
+        pass
+
+
+def load_health():
+    try:
+        with open(HEALTH_FILE, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_health(health):
+    _ensure_state_dir()
+    try:
+        tmp = HEALTH_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(health, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, HEALTH_FILE)
+    except OSError:
+        pass
+
+
+def record_op(op_type, phase, detail=None):
+    _ensure_state_dir()
+    entry = {"ts": int(time.time()), "type": op_type, "phase": phase}
+    if detail:
+        entry["detail"] = detail
+    try:
+        with open(OPS_FILE, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        if os.path.getsize(OPS_FILE) > 256 * 1024:
+            with open(OPS_FILE, "r", encoding="utf-8") as fh:
+                lines = fh.readlines()[-300:]
+            with open(OPS_FILE, "w", encoding="utf-8") as fh:
+                fh.writelines(lines)
+    except OSError:
+        pass
+
+
+def current_subscription():
+    try:
+        cur, items = read_subscriptions()
+    except Exception:
+        return {"uid": "", "name": ""}
+    for it in items:
+        if it["uid"] == cur:
+            return {"uid": cur, "name": it["name"]}
+    return {"uid": cur, "name": ""}
 
 
 def load_config():
@@ -709,8 +769,7 @@ def _sub_probe(url):
 
 
 def poll_subscriptions(engine, force=False):
-    cfg = engine.cfg
-    health = dict(cfg.get("sub_health") or {})
+    health = load_health()
     current, items = read_subscriptions()
     for it in items:
         if not it["url"]:
@@ -721,8 +780,7 @@ def poll_subscriptions(engine, force=False):
         samples.append(sample)
         rec["samples"] = samples[-24:]
         health[it["uid"]] = rec
-    cfg["sub_health"] = health
-    save_config(cfg)
+    save_health(health)
     return health
 
 
@@ -760,7 +818,70 @@ def switch_subscription(engine, uid):
         fh.write(new_text)
     subprocess.run(["open", "-b", "io.github.clash-verge-rev.clash-verge-rev"],
                    capture_output=True)
+    record_op("subscription", "activated", {"uid": uid})
     return {"ok": True, "uid": uid}
+
+
+def build_runtime(engine):
+    """统一运行快照：订阅、内核、TUN、分组当前选择、能力与新鲜度。"""
+    now = time.time()
+    sub = current_subscription()
+    ok = controller_alive(engine.cfg)
+    if ok:
+        engine.last_ctl_ok = now
+    cfg = {}
+    tun = {}
+    conns = 0
+    try:
+        if ok:
+            ctx = controller_ctx(engine.cfg)
+            cfg = api(ctx, "GET", "/configs", timeout=6)
+            tun = cfg.get("tun") or {}
+            conns = len((api(ctx, "GET", "/connections", timeout=6).get("connections") or []))
+    except Exception:
+        cfg, tun, conns = {}, {}, 0
+
+    groups = []
+    for gid, runner in engine.runners.items():
+        snap = runner.snapshot()
+        groups.append({
+            "id": gid,
+            "label": runner.cfg.get("label", gid),
+            "role": runner.cfg.get("role", "general"),
+            "enabled": bool(runner.cfg.get("enabled", True)),
+            "current": snap.get("current"),
+            "current_ms": snap.get("current_ms"),
+            "last_run": snap.get("last_run"),
+            "last_action": (snap.get("last_detail") or {}).get("action"),
+        })
+
+    ctl = engine.controller or {}
+    return {
+        "ok": True,
+        "now": int(now),
+        "epoch": getattr(engine, "epoch", 0),
+        "configRevision": int(engine.cfg.get("config_revision", 1)),
+        "subscription": sub,
+        "controller": {
+            "ok": ok,
+            "kind": ctl.get("kind"),
+            "target": ctl.get("target"),
+            "checkedAgoSeconds": int(now - engine.last_ctl_ok) if engine.last_ctl_ok else None,
+        },
+        "config": {
+            "mode": cfg.get("mode"),
+            "mixedPort": cfg.get("mixed-port") or cfg.get("port"),
+            "tun": {"enable": bool(tun.get("enable")), "stack": tun.get("stack") or ""},
+            "connections": conns,
+        },
+        "groups": groups,
+        "capabilities": {
+            "canSwitchGroup": ok,
+            "canWriteTemplates": True,
+            "canControlSystemVpn": IS_MAC,
+            "canControlNeVpn": False,
+        },
+    }
 
 
 def controller_alive(cfg):
@@ -1566,7 +1687,16 @@ def _filter_hint(stats):
 def run_group(engine, g, dry_run=False, runner=None):
     ctx = controller_ctx(engine.cfg)
     epoch = runner.manual_epoch if runner is not None else 0
+    start_epoch = getattr(engine, "epoch", 0)
+    start_sub = current_subscription().get("uid", "")
     res = {"at": datetime.now().strftime("%H:%M:%S"), "group": g["label"], "id": g["id"]}
+
+    def _stale():
+        if getattr(engine, "epoch", start_epoch) != start_epoch:
+            return "运行上下文已变化（订阅/配置更新），本轮结果作废"
+        if current_subscription().get("uid", "") != start_sub:
+            return "当前订阅已切换，本轮结果作废"
+        return ""
 
     if not (ctx.get("unix") or ctx.get("host")):
         res.update(action="skip", message="Clash 未运行（找不到控制端口）")
@@ -1600,6 +1730,12 @@ def run_group(engine, g, dry_run=False, runner=None):
         # 此时回退到基础延迟最好的节点，总比守着一个死节点强。
         if current_ms is None and candidates:
             fallback = candidates[0]
+
+            stale_msg = _stale()
+            if stale_msg:
+                res.update(action="skip", message=stale_msg)
+                log("[%s] %s" % (g["label"], stale_msg))
+                return res
 
             if dry_run:
                 msg = "DRY-RUN 将回退 %s -> %s (%s)" % (
@@ -1681,6 +1817,12 @@ def run_group(engine, g, dry_run=False, runner=None):
         msg = "保持 %s (%s)，最优 %s (%s)" % (current, fmt_ms(cur_score), best["name"], fmt_ms(best_score))
         res.update(action="keep", message=msg, best=best["name"], best_ms=best_score)
         log(tag + msg)
+        return res
+
+    stale_msg = _stale()
+    if stale_msg:
+        res.update(action="skip", message=stale_msg)
+        log(tag + stale_msg)
         return res
 
     if dry_run:
@@ -1850,6 +1992,10 @@ class Engine(object):
         self.cfg = load_config()
         self.cfg["clash_dir"] = self.cfg.get("clash_dir") or detect_clash_dir()
         self.controller = detect_controller(self.cfg) or {}
+        self.epoch = 1
+        self.last_ctl_ok = 0.0
+        self.cfg.setdefault("config_revision", 1)
+        self.cfg.setdefault("schema_version", 2)
         refresh_region_state(self.cfg, load_profile_servers(self.cfg.get("clash_dir")))
         self.stopped = False
         self.site = {"running": False, "url": "", "results": []}
@@ -1860,6 +2006,11 @@ class Engine(object):
         for g in self.cfg["groups"]:
             self.runners[g["id"]] = Runner(self, g)
         self._started = False
+
+    def bump_epoch(self, reason):
+        self.epoch += 1
+        record_op("epoch", "bumped", {"reason": reason, "epoch": self.epoch})
+        return self.epoch
 
     def add_group(self, name):
         name = (name or "").strip()
@@ -2070,6 +2221,9 @@ a{color:inherit}
   background:linear-gradient(var(--page) 72%,rgba(247,248,250,0))}
 .topbar h1{font-size:19px;font-weight:600;letter-spacing:-.015em;margin:0}
 .topbar .row{gap:2px}
+.ctxbar{display:flex;gap:16px;flex-wrap:wrap;font-size:11.5px;color:var(--text-3);
+  padding:0 36px 8px;margin-top:-4px}
+.ctxbar b{font-weight:500;color:var(--text-2)}
 .content{padding:10px 36px 72px;width:100%;max-width:1080px}
 
 /* 卡片：统一圆角 + 微弱投影，作为层级高光 */
@@ -2217,8 +2371,8 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
       <svg viewBox="0 0 24 24"><path d="M4 11.5 12 4l8 7.5"/><path d="M6.5 10v9h11v-9"/></svg>
       概览</button>
 
-    <div class="navgroup" data-group="nodes">
-      <button class="navhead" data-toggle="nodes">节点
+    <div class="navgroup" data-group="policy">
+      <button class="navhead" data-toggle="policy">策略
         <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
       <div class="navsub">
         <button data-nav="groups" class="on">
@@ -2227,28 +2381,42 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
         <button data-nav="routes">
           <svg viewBox="0 0 24 24"><circle cx="5" cy="6" r="2.2"/><circle cx="19" cy="18" r="2.2"/><path d="M7.2 6h5.3a4 4 0 0 1 0 8h-4a3.5 3.5 0 0 0 0 7h8.3"/></svg>
           分流规则</button>
-        <button data-nav="apps">
-          <svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M3.5 9h17"/></svg>
-          应用</button>
       </div>
     </div>
 
-    <div class="navgroup" data-group="tools">
-      <button class="navhead" data-toggle="tools">工具
+    <div class="navgroup" data-group="resource">
+      <button class="navhead" data-toggle="resource">资源
         <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
       <div class="navsub">
         <button data-nav="sub">
           <svg viewBox="0 0 24 24"><path d="M12 4v11"/><path d="m7.5 10.5 4.5 4.5 4.5-4.5"/><path d="M5 19.5h14"/></svg>
           订阅</button>
-        <button data-nav="site">
-          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17"/><path d="M12 3.5c2.6 2.6 2.6 14.4 0 17-2.6-2.6-2.6-14.4 0-17z"/></svg>
-          站点诊断</button>
+      </div>
+    </div>
+
+    <div class="navgroup" data-group="network">
+      <button class="navhead" data-toggle="network">网络
+        <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+      <div class="navsub">
         <button data-nav="tun">
           <svg viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h10"/></svg>
           TUN</button>
         <button data-nav="vpn">
           <svg viewBox="0 0 24 24"><path d="M12 3.5 19 6v5.6c0 4-2.9 6.9-7 8.9-4.1-2-7-4.9-7-8.9V6z"/></svg>
           VPN</button>
+      </div>
+    </div>
+
+    <div class="navgroup" data-group="observe">
+      <button class="navhead" data-toggle="observe">观察
+        <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+      <div class="navsub">
+        <button data-nav="apps">
+          <svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M3.5 9h17"/></svg>
+          连接与应用</button>
+        <button data-nav="site">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17"/><path d="M12 3.5c2.6 2.6 2.6 14.4 0 17-2.6-2.6-2.6-14.4 0-17z"/></svg>
+          站点诊断</button>
       </div>
     </div>
   </div>
@@ -2273,13 +2441,14 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
       <button id="quitbtn" class="ghost">退出</button>
     </div>
   </header>
+  <div class="ctxbar" id="ctxbar"></div>
   <div class="content">
 
 <section id="sec-overview">
   <div class="card">
     <div class="row" style="justify-content:space-between;align-items:flex-start">
       <div>
-        <div class="muted" style="font-size:12px">当前出口</div>
+        <div class="muted" style="font-size:12px">分组当前选择</div>
         <div id="ov-groups" style="margin-top:8px"></div>
         <div class="muted" id="ov-vpnline" style="margin-top:10px;font-size:12px"></div>
       </div>
@@ -2316,7 +2485,7 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
     <div class="quick">
       <button data-goto="groups">分组<span>选择与设置</span></button>
       <button data-goto="routes">分流规则<span>域名 / 进程</span></button>
-      <button data-goto="apps">应用分流<span>实时出口</span></button>
+      <button data-goto="apps">连接与应用<span>实时出口</span></button>
       <button data-goto="vpn">系统 VPN<span>状态与保活</span></button>
     </div>
   </div>
@@ -2330,9 +2499,9 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
   <div class="card">
     <div class="row">
       <select id="addsel" style="flex:1"></select>
-      <button id="addbtn">添加分组</button>
-      <button id="newgroupbtn" class="ghost">新建分组</button>
-      <button id="rescanbtn" class="ghost">扫描新分组</button>
+      <button id="addbtn">纳管已有分组</button>
+      <button id="newgroupbtn" class="ghost">创建客户端分组</button>
+      <button id="rescanbtn" class="ghost">重新发现分组</button>
     </div>
     <div class="muted" id="addmsg" style="margin-top:6px"></div>
   </div>
@@ -2341,7 +2510,7 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
 
 <section id="sec-routes" hidden>
   <div class="card">
-    <h2>分流规则（全局）</h2>
+    <h2>分流规则</h2>
     <table><thead><tr><th style="width:150px">匹配方式</th><th>值</th><th style="width:190px">走向</th><th style="width:52px"></th></tr></thead>
     <tbody id="rt"></tbody></table>
     <div class="row" style="margin-top:10px">
@@ -2356,7 +2525,8 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
       <select id="rt-target" style="width:190px"></select>
       <button id="rt-add">添加</button>
       <button id="rt-ai" class="ghost">导入 AI 站点规则</button>
-      <button class="primary" id="rt-apply">保存并应用</button>
+      <button id="rt-save">保存草稿</button>
+      <button class="primary" id="rt-apply">应用（重启内核）</button>
     </div>
     <div class="muted" id="rt-msg" style="margin-top:8px"></div>
   </div>
@@ -2410,7 +2580,7 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
   </div>
   <div class="card">
     <div class="row" style="justify-content:space-between">
-      <div><b>应用分流</b> <span id="apps-badge" class="badge">-</span></div>
+      <div><b>连接与应用</b> <span id="apps-badge" class="badge">-</span></div>
       <button id="apps-refresh" class="ghost">刷新</button>
     </div>
     <div class="muted" id="apps-note" style="margin-top:8px">-</div>
@@ -2544,7 +2714,7 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
 
 <div class="modal" id="newgroupmodal" hidden>
   <div class="box">
-    <div class="row" style="justify-content:space-between"><b>新建分组</b><button id="ng-close" class="ghost">关闭</button></div>
+    <div class="row" style="justify-content:space-between"><b>创建客户端分组</b><button id="ng-close" class="ghost">关闭</button></div>
     <label>分组名称</label><input id="ng-name" placeholder="例如 AI-Claude">
     <label>成员（可多选，按住 ⌘/Ctrl）</label>
     <select id="ng-members" multiple size="10" style="width:100%"></select>
@@ -2563,7 +2733,7 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
 </div>
 <script>
 var STATUS=null, CTL={}, ROUTES=[], RT_TARGETS=[], SITE={}, NAV='overview';
-var TITLES = {overview:'概览', groups:'分组', routes:'分流规则', sub:'订阅', site:'站点诊断', vpn:'系统 VPN', apps:'应用分流', tun:'TUN'};
+var TITLES = {overview:'概览', groups:'分组与选优', routes:'分流规则', sub:'订阅', site:'站点诊断', vpn:'系统 VPN', apps:'连接与应用', tun:'TUN'};
 var PROVIDERS=[];
 
 function loadProviders(){
@@ -2593,6 +2763,7 @@ document.querySelectorAll('[data-toggle]').forEach(function(h){
 document.querySelectorAll('[data-nav]').forEach(function(b){
   b.onclick = function(){
     NAV = b.dataset.nav;
+    loadRuntime(true);
     var pt = el('pagetitle'); if(pt) pt.textContent = TITLES[NAV] || '';
     if(location.hash !== '#' + NAV){ try{ history.replaceState(null,'','#'+NAV); }catch(e){} }
     document.querySelectorAll('[data-nav]').forEach(function(x){ x.classList.toggle('on', x===b); });
@@ -2931,6 +3102,28 @@ document.addEventListener('click', function(e){
     });
   });
 });
+
+var __lastRuntime = 0;
+
+function loadRuntime(force){
+  var now = Date.now();
+  if(!force && now - __lastRuntime < 25000) return;
+  __lastRuntime = now;
+  get('/api/v2/runtime').then(function(d){
+    if(!d || !d.ok) return;
+    var bits = [];
+    bits.push('订阅 <b>' + esc((d.subscription && d.subscription.name) || '未知') + '</b>');
+    bits.push('内核 ' + (d.controller.ok ? '<b>已连接</b>' : '未连接'));
+    bits.push('模式 ' + esc(d.config.mode || '—'));
+    bits.push('TUN ' + (d.config.tun.enable ? '<b>已开</b>' : '已关'));
+    bits.push('连接 ' + (d.config.connections || 0));
+    if(d.controller.checkedAgoSeconds !== null && d.controller.checkedAgoSeconds !== undefined){
+      bits.push('采集 ' + d.controller.checkedAgoSeconds + 's 前');
+    }
+    var bar = el('ctxbar');
+    if(bar) bar.innerHTML = bits.join('<span style="opacity:.35">·</span>');
+  }).catch(function(){});
+}
 
 function loadOverview(){
   get('/api/overview').then(function(d){
@@ -3395,7 +3588,7 @@ function groupCard(g){
     + ' <span class="gsum" data-role="summary"></span></div>'
     + '<div class="row"><button data-act="run">立即检测</button>'
     + '<button data-act="toggle" class="ghost">暂停</button>'
-    + '<button data-act="remove" class="ghost">移除</button></div></div>'
+    + '<button data-act="remove" class="ghost">停止纳管</button></div></div>'
     + '<div class="gbody">'
     + '<div class="grid" style="margin-top:14px">'
     + '<div><div class="muted">当前节点</div><div class="big mono" data-role="current">-</div>'
@@ -3700,9 +3893,15 @@ el('rt-ai').onclick = function(){
   });
 };
 
+el('rt-save').onclick = function(){
+  post('/api/routes',{routes:ROUTES}).then(function(){
+    el('rt-msg').textContent = '草稿已保存（尚未应用）';
+  });
+};
+
 el('rt-apply').onclick = function(){
   if(CTL.kind !== 'unix'){ el('rt-msg').textContent='分流规则应用依赖 Clash Verge 的配置目录'; return; }
-  el('rt-msg').textContent = '正在写入并重启内核…';
+  el('rt-msg').textContent = '正在写入并重启内核…（约 15 秒）';
   post('/api/routes',{routes:ROUTES}).then(function(){ return post('/api/routes/apply',{}); })
     .then(function(r){ el('rt-msg').textContent = r.ok ? '已写入，内核重启中（约 15 秒）' : ('失败：'+(r.error||'')); });
 };
@@ -3890,6 +4089,15 @@ class Handler(BaseHTTPRequestHandler):
                 tail = "（暂无日志）"
             page = PAGE.replace("<!--LOGTAIL-->", html.escape(tail or "（暂无日志）"))
             return self._send(200, page, "text/html; charset=utf-8")
+        if path == "/api/v2/runtime":
+            return self._send(200, json.dumps(build_runtime(eng), ensure_ascii=False))
+        if path == "/api/v2/config":
+            cfg = dict(eng.cfg)
+            cfg.pop("api_secret", None)
+            return self._send(200, json.dumps({
+                "ok": True, "revision": int(cfg.get("config_revision", 1)),
+                "schemaVersion": int(cfg.get("schema_version", 2)),
+                "config": cfg}, ensure_ascii=False))
         if path == "/api/overview":
             vpn_info = {"tunnel": _active_tunnel(), "clients": _running_vpn_clients(),
                         "name": _active_vpn_name()}
@@ -3990,6 +4198,7 @@ class Handler(BaseHTTPRequestHandler):
             eng._ctl_ok = ok
             if ok:
                 ctl = detect_controller(eng.cfg) or ctl
+                eng.last_ctl_ok = time.time()
             else:
                 ctl = {}
             eng.controller = ctl
@@ -4113,7 +4322,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({"ok": True, "proxies": names}, ensure_ascii=False))
         if path == "/api/subscriptions":
             current, items = read_subscriptions()
-            health = eng.cfg.get("sub_health") or {}
+            health = load_health() or (eng.cfg.get("sub_health") or {})
             for it in items:
                 rec = health.get(it["uid"]) or {}
                 samples = rec.get("samples") or []
@@ -4143,6 +4352,9 @@ class Handler(BaseHTTPRequestHandler):
                 "clash_dir": eng.cfg.get("clash_dir", ""),
             }, ensure_ascii=False))
         return self._send(404, json.dumps({"error": "not found"}))
+
+    def do_PATCH(self):
+        self.do_POST()
 
     def do_POST(self):
         if not self._guard():
@@ -4207,6 +4419,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/subscriptions/activate":
             uid = str(payload.get("uid") or "").strip()
             res = switch_subscription(self.engine, uid)
+            if res.get("ok"):
+                self.engine.bump_epoch("subscription-switch")
             return self._send(200, json.dumps(res, ensure_ascii=False))
         if path == "/api/vpn":
             res = vpn_action(str(payload.get("name") or ""), str(payload.get("action") or ""))
@@ -4322,6 +4536,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(500, json.dumps({"ok": False, "error": str(exc)},
                                                   ensure_ascii=False))
             threading.Thread(target=restart_verge, daemon=True).start()
+            self.engine.bump_epoch("rules-apply")
+            record_op("rules", "applied", {"file": os.path.basename(written)})
             return self._send(200, json.dumps({"ok": True, "file": written},
                                               ensure_ascii=False))
         if path == "/api/sitecheck":
@@ -4344,6 +4560,41 @@ class Handler(BaseHTTPRequestHandler):
                 if gid in (None, "", rid):
                     runner.run(block=False)
             return self._send(200, json.dumps({"ok": True}))
+        if path == "/api/v2/config":
+            expected = payload.get("expectedRevision")
+            patch = payload.get("patch") or {}
+            current_rev = int(self.engine.cfg.get("config_revision", 1))
+            if expected is not None and int(expected) != current_rev:
+                return self._send(409, json.dumps({
+                    "ok": False, "error": "revision 冲突", "revision": current_rev},
+                    ensure_ascii=False))
+            allowed = ("enabled", "vpn_keep", "vpn_interval", "sub_poll_interval")
+            applied = {}
+            for key in allowed:
+                if key not in patch:
+                    continue
+                val = patch[key]
+                try:
+                    if key in ("enabled",):
+                        val = bool(val)
+                    elif key in ("vpn_interval", "sub_poll_interval"):
+                        val = max(120, int(val))
+                    elif key == "vpn_keep":
+                        val = [str(x) for x in (val or [])]
+                    applied[key] = val
+                except Exception:
+                    return self._send(422, json.dumps({
+                        "ok": False, "error": "字段无效: %s" % key}, ensure_ascii=False))
+            if not applied:
+                return self._send(422, json.dumps({
+                    "ok": False, "error": "没有可应用的字段"}, ensure_ascii=False))
+            self.engine.cfg.update(applied)
+            self.engine.cfg["config_revision"] = current_rev + 1
+            save_config(self.engine.cfg)
+            record_op("config", "saved", {"revision": current_rev + 1, "keys": list(applied)})
+            return self._send(200, json.dumps({
+                "ok": True, "revision": current_rev + 1, "applied": applied},
+                ensure_ascii=False))
         if path == "/api/config":
             gid = payload.get("id")
             patch = payload.get("patch") or {}

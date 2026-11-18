@@ -64,6 +64,11 @@ Autonode 的原则是 **稳定优先于快**：
 
 Clash Verge / ClashX / Stash / Clash for Windows / mihomo —— 通过 `external-controller` 通信，自动探测 unix socket 或 TCP 端口。
 
+## 3.0 路线
+
+当前处于 3.0 alpha：统一运行快照、运行代次、配置 revision、操作记录、导航重构（概览/策略/资源/网络/观察）。
+详见 [docs/ROADMAP-3.0.md](docs/ROADMAP-3.0.md)。
+
 ## 安全
 
 - 控制台只监听 `127.0.0.1`，校验 `Host`/`Origin`，防止 CSRF 与 DNS rebinding
