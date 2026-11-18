@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.1.1-beta.4"
+VERSION = "2.1.1-beta.5"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -583,6 +583,56 @@ def _prefs_vpn_services():
         out.append({"id": sid, "name": svc.get("UserDefinedName") or sid,
                     "proto": ("%s/%s" % (itype, sub)).strip("/")})
     return out
+
+
+SESSION_TRAFFIC = {"download": 0, "upload": 0, "since": time.time()}
+_CONN_LAST = {}
+_NETTOP_LAST = {}
+
+
+def _acc(down_delta, up_delta):
+    if down_delta > 0:
+        SESSION_TRAFFIC["download"] += down_delta
+    if up_delta > 0:
+        SESSION_TRAFFIC["upload"] += up_delta
+
+
+def traffic_sampler(engine):
+    """每 2 秒采样一次，累计本次运行以来的流量。服务退出即清零。"""
+    while True:
+        try:
+            if controller_alive(engine.cfg):
+                ctx = controller_ctx(engine.cfg)
+                data = api(ctx, "GET", "/connections", timeout=6)
+                conns = data.get("connections") or []
+                alive = set()
+                for c in conns:
+                    cid = c.get("id")
+                    if not cid:
+                        continue
+                    alive.add(cid)
+                    up = c.get("upload") or 0
+                    down = c.get("download") or 0
+                    if cid in _CONN_LAST:
+                        pu, pd = _CONN_LAST[cid]
+                        _acc(down - pd, up - pu)
+                    _CONN_LAST[cid] = (up, down)
+                for cid in list(_CONN_LAST):
+                    if cid not in alive:
+                        del _CONN_LAST[cid]
+            else:
+                totals = nettop_bytes()
+                for name, val in totals.items():
+                    prev = _NETTOP_LAST.get(name)
+                    _NETTOP_LAST[name] = val["download"]
+                    if prev is not None and val["download"] > prev:
+                        _acc(val["download"] - prev, 0)
+                for name in list(_NETTOP_LAST):
+                    if name not in totals:
+                        del _NETTOP_LAST[name]
+        except Exception:
+            pass
+        time.sleep(2)
 
 
 def controller_alive(cfg):
@@ -2165,7 +2215,7 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
   <div class="kpis">
     <div class="kpi"><div class="klabel">活跃应用</div><div class="kval" id="k-apps">–</div><div class="kfoot">当前有连接</div></div>
     <div class="kpi"><div class="klabel">连接总数</div><div class="kval" id="k-conns">–</div><div class="kfoot">内核活动连接</div></div>
-    <div class="kpi"><div class="klabel">下载合计</div><div class="kval" id="k-dl">–</div><div class="kfoot">本会话累计</div></div>
+    <div class="kpi"><div class="klabel">本次运行下载</div><div class="kval" id="k-dl">–</div><div class="kfoot">本会话累计</div></div>
     <div class="kpi"><div class="klabel">TUN</div><div class="kval" id="k-tun">–</div><div class="kfoot" id="k-tun-foot">—</div></div>
   </div>
   <div class="card">
@@ -2503,8 +2553,9 @@ function loadApps(){
       ? ('系统统计 · ' + d.count + ' 个应用')
       : ('进程识别 ' + (d.find_process_mode || '-') + ' · 共 ' + d.count + ' 个应用');
 
-    var conns = 0, dl = 0;
-    (d.apps || []).forEach(function(a){ conns += a.conns; dl += a.download; });
+    var conns = 0;
+    (d.apps || []).forEach(function(a){ conns += a.conns; });
+    var dl = (d.session && d.session.download) || 0;
     if(el('k-apps')) el('k-apps').textContent = String(d.count);
     if(el('k-conns')) el('k-conns').textContent = String(conns);
     if(el('k-dl')) el('k-dl').textContent = fmtBytes(dl);
@@ -3675,6 +3726,11 @@ class Handler(BaseHTTPRequestHandler):
                         "notice": "系统统计"}
             else:
                 data["mode"] = "clash"
+            data["session"] = {
+                "download": SESSION_TRAFFIC["download"],
+                "upload": SESSION_TRAFFIC["upload"],
+                "seconds": int(time.time() - SESSION_TRAFFIC["since"]),
+            }
             return self._send(200, json.dumps(data, ensure_ascii=False))
         if path == "/api/tun":
             return self._send(200, json.dumps(tun_state(), ensure_ascii=False))
@@ -3923,6 +3979,7 @@ def main(argv):
             % (port, "、".join(g["label"] for g in engine.cfg["groups"])))
         engine.start()
         threading.Thread(target=vpn_watchdog, args=(engine,), daemon=True).start()
+        threading.Thread(target=traffic_sampler, args=(engine,), daemon=True).start()
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
