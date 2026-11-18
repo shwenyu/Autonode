@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.2.0-beta.3"
+VERSION = "2.2.0-beta.4"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -1480,7 +1480,10 @@ def evaluate(ctx, g):
     all_nodes = group.get("all") or []
     current = group.get("now") or ""
 
-    targets = [n for n in all_nodes if is_node(n) and region_priority(n, g["regions"]) is not None]
+    nodes = [n for n in all_nodes if is_node(n)]
+    targets = [n for n in nodes if region_priority(n, g["regions"]) is not None]
+    stats = {"all": len(all_nodes), "nodes": len(nodes), "region": len(targets),
+             "probed": 0, "verify_failed": 0}
 
     delays = {}
 
@@ -1498,6 +1501,7 @@ def evaluate(ctx, g):
         candidates.append({"name": name, "region": region, "priority": pri,
                            "ms": ms, "verify_ms": None})
     candidates.sort(key=lambda x: (x["ms"], x["priority"]))
+    stats["probed"] = len(candidates)
 
     # 第二阶段：目标验证
     # 关键：必须**串行**探测。同一出口 IP 并发打 chatgpt.com 会被 Cloudflare 判为异常
@@ -1516,7 +1520,7 @@ def evaluate(ctx, g):
                 for c in candidates:
                     if c["name"] == current:
                         c["verify_ms"] = cur_v
-                return current, delays.get(current), candidates, "current-good", len(targets)
+                return current, delays.get(current), candidates, "current-good", len(targets), stats
             time.sleep(verify_gap)
 
         shortlist = candidates[:int(g["verify_top"])]
@@ -1537,9 +1541,26 @@ def evaluate(ctx, g):
             rest = [c for c in candidates if c not in shortlist]
             candidates = good + rest
         else:
-            return current, delays.get(current), candidates, "verify-all-failed", len(targets)
+            stats["verify_failed"] = max(0, len(shortlist) - len(good))
+            return current, delays.get(current), candidates, "verify-all-failed", len(targets), stats
 
-    return current, delays.get(current), candidates, None, len(targets)
+    return current, delays.get(current), candidates, None, len(targets), stats
+
+
+def _filter_hint(stats):
+    """把"为什么一个可用节点都没有"翻译成人话。"""
+    all_n = stats.get("all", 0)
+    nodes = stats.get("nodes", 0)
+    region = stats.get("region", 0)
+    probed = stats.get("probed", 0)
+    parts = []
+    if all_n - nodes:
+        parts.append("非节点 %d" % (all_n - nodes))
+    if nodes - region:
+        parts.append("地区不匹配 %d" % (nodes - region))
+    if region - probed:
+        parts.append("测速失败 %d" % (region - probed))
+    return "共 %d：%s" % (all_n, "，".join(parts)) if parts else "共 %d" % all_n
 
 
 def run_group(engine, g, dry_run=False, runner=None):
@@ -1553,7 +1574,7 @@ def run_group(engine, g, dry_run=False, runner=None):
         return res
 
     try:
-        current, current_ms, candidates, flag, total_nodes = evaluate(ctx, g)
+        current, current_ms, candidates, flag, total_nodes, stats = evaluate(ctx, g)
     except Exception as exc:
         res.update(action="error", message=str(exc))
         log("[%s] 测速失败 %s" % (g["label"], exc))
@@ -1622,6 +1643,8 @@ def run_group(engine, g, dry_run=False, runner=None):
     if len(candidates) < floor and not (current_dead and candidates):
         msg = "可用节点仅 %d 个（阈值 %d，共 %d），不切换" % (
             len(candidates), floor, total_nodes or len(candidates))
+        if not candidates and stats.get("all"):
+            msg += " · " + _filter_hint(stats)
         res.update(action="skip", message=msg)
         log("[%s] %s" % (g["label"], msg))
         return res
@@ -3395,7 +3418,8 @@ function groupCard(g){
     + '<label>角色</label><select data-field="role"><option value="ai">AI 通道（粘滞，只在失效时换）</option><option value="general">通用（按延迟择优）</option></select>'
     + '</div></div>'
     + '<label style="margin-top:12px">地区偏好</label><div class="chips" data-role="regions"></div>'
-    + '<div class="row" style="margin-top:12px"><button class="primary" data-act="save">保存设置</button><button class="ghost" data-act="regions">未识别地区…</button>'
+    + '<div class="muted" data-role="regionstat" style="margin-top:8px;font-size:11.5px"></div>'
+    + '<div class="row" style="margin-top:12px"><button class="primary" data-act="save">保存设置</button><button class="ghost" data-act="regions">未识别地区…</button><button class="ghost" data-act="allregions">全选地区</button>'
     + '<span class="muted" data-role="save"></span></div></details></div></div>';
 }
 
@@ -3414,6 +3438,17 @@ function applyCollapse(card, gid){
   if(!card) return;
   var map = collapsedMap();
   card.classList.toggle('collapsed', !!map[gid]);
+}
+
+function loadRegionStat(card, gid){
+  var box = card.querySelector('[data-role="regionstat"]');
+  if(!box) return;
+  get('/api/nodes?id=' + encodeURIComponent(gid)).then(function(d){
+    if(!d || d.matched === undefined) return;
+    box.textContent = '地区筛选：' + d.matched + ' / ' + d.real + ' 个节点'
+      + (d.filtered ? '（' + d.filtered + ' 个被地区偏好排除）' : '');
+    box.style.color = d.matched ? 'var(--text-3)' : 'var(--warn)';
+  }).catch(function(){});
 }
 
 function fillGroupForm(card, g){
@@ -3478,6 +3513,7 @@ function renderGroups(s){
       var card = box.querySelector('[data-gid="'+g.id+'"]');
       fillGroupForm(card, g);
       applyCollapse(card, g.id);
+      loadRegionStat(card, g.id);
     });
   }
 }
@@ -3533,6 +3569,10 @@ document.addEventListener('click', function(e){
     map[gid] = !map[gid];
     saveCollapsed(map);
     card.classList.toggle('collapsed', !!map[gid]);
+  }
+  else if(act==='allregions'){
+    card.querySelectorAll('[data-role="regions"] input').forEach(function(i){ i.checked = true; });
+    notify('已全选地区，记得点「保存设置」');
   }
   else if(act==='regions'){ openRegionModal(); }
   else if(act==='save'){
@@ -3981,9 +4021,14 @@ class Handler(BaseHTTPRequestHandler):
                            timeout=10)
             except Exception as exc:
                 return self._send(500, json.dumps({"error": str(exc)}, ensure_ascii=False))
-            nodes = [n for n in (data.get("all") or []) if is_node(n)]
-            return self._send(200, json.dumps({"now": data.get("now"), "nodes": nodes},
-                                              ensure_ascii=False))
+            all_nodes = data.get("all") or []
+            nodes = [n for n in all_nodes if is_node(n)]
+            matched = [n for n in nodes if region_priority(n, runner.cfg["regions"]) is not None]
+            return self._send(200, json.dumps({
+                "now": data.get("now"), "nodes": nodes,
+                "total": len(all_nodes), "real": len(nodes),
+                "matched": len(matched), "filtered": len(nodes) - len(matched),
+            }, ensure_ascii=False))
         if path == "/api/sitecheck":
             return self._send(200, json.dumps(self.engine.site, ensure_ascii=False))
         if path == "/api/groups/available":

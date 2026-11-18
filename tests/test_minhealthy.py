@@ -34,7 +34,7 @@ def run(total, candidates, current="dead", current_ms=None):
         return {}
 
     m.api = fake_api
-    m.evaluate = lambda ctx, g: (current, current_ms, candidates, None, total)
+    m.evaluate = lambda ctx, g: (current, current_ms, candidates, None, total, {"all": total})
     res = m.run_group(Engine(), GROUP, dry_run=False)
     return res, puts
 
