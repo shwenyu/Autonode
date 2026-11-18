@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "3.0.0-alpha.3"
+VERSION = "3.0.0-alpha.4"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -227,6 +227,29 @@ def refresh_region_state(cfg, servers=None):
         _REGION_STATE["servers"] = dict(servers)
 
 
+SELECTION_PROFILES = {
+    "aggressive": {"interval_seconds": 120, "keep_factor": 1.15, "keep_offset_ms": 15,
+                   "manual_hold_seconds": 600,
+                   "label": "激进（追最快）"},
+    "balanced": {"interval_seconds": 300, "keep_factor": 1.30, "keep_offset_ms": 30,
+                 "manual_hold_seconds": 1800,
+                 "label": "稳健（默认）"},
+    "conservative": {"interval_seconds": 900, "keep_factor": 2.00, "keep_offset_ms": 200,
+                     "manual_hold_seconds": 3600,
+                     "label": "保守（少换 IP）"},
+}
+
+
+def apply_selection_profile(g, name):
+    preset = SELECTION_PROFILES.get(name)
+    if not preset:
+        return False
+    for k in ("interval_seconds", "keep_factor", "keep_offset_ms", "manual_hold_seconds"):
+        g[k] = preset[k]
+    g["profile"] = name
+    return True
+
+
 COMMON = {
     "enabled": True,
     "test_url": "https://www.gstatic.com/generate_204",
@@ -317,6 +340,9 @@ def _normalize_group(item):
     label = cfg.get("label") or ""
     if not cfg.get("role"):
         cfg["role"] = "ai" if "AI" in label.upper() else "general"
+    cfg.setdefault("profile", "balanced")
+    if cfg["profile"] not in SELECTION_PROFILES:
+        cfg["profile"] = "balanced"
     if cfg["role"] == "ai":
         # AI 通道：低频、粘滞（只要当前节点验证通过就不换），避免 IP 漂移触发风控
         item_interval = item.get("interval_seconds")
@@ -844,6 +870,51 @@ def _chain_of(proxies, name, depth=0):
     return [name]
 
 
+def _fuzzy_rules(rules, host, is_proc, limit=5):
+    """精确未命中时，按关键词/后缀相似度找最可能的规则。"""
+    tokens = [t for t in host.replace("/", ".").split(".") if t]
+    host_labels = set(tokens)
+    scored = []
+    for i, r in enumerate(rules):
+        typ = (r.get("type") or "")
+        payload = (r.get("payload") or "").strip().lower()
+        if not payload:
+            continue
+        score = 0
+        if typ in ("Domain", "DOMAIN", "DomainSuffix", "DOMAIN-SUFFIX",
+                   "DomainKeyword", "DOMAIN-KEYWORD"):
+            if payload == host:
+                score = 100
+            elif host.endswith("." + payload):
+                score = 85
+            elif payload.endswith("." + host):
+                score = 75
+            elif payload in host:
+                score = 62 + min(len(payload), 20)
+            elif host in payload:
+                score = 55 + min(len(host), 20)
+            else:
+                plabels = set(p for p in payload.split(".") if p)
+                common = len(host_labels & plabels)
+                if common:
+                    score = 30 + common * 5
+        elif typ in ("ProcessName", "PROCESS-NAME"):
+            if payload == host:
+                score = 100
+            elif payload in host or host in payload:
+                score = 45
+        elif typ in ("Match", "MATCH"):
+            continue
+        if score > 0:
+            scored.append((score, i, r))
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    out = []
+    for score, i, r in scored[:limit]:
+        out.append({"index": i + 1, "score": score, "type": r.get("type"),
+                    "payload": r.get("payload"), "proxy": r.get("proxy")})
+    return out
+
+
 def resolve_path(engine, target):
     """给定域名/URL/进程名，解析它实际会走哪条规则、哪个分组、哪个节点。"""
     host = _norm_target(target)
@@ -884,9 +955,34 @@ def resolve_path(engine, target):
             break
 
     if not matched:
-        return {"ok": True, "target": host, "isProcess": is_proc,
-                "totalRules": len(rules), "matched": None,
-                "steps": [], "risk": "unknown"}
+        fuzzy = _fuzzy_rules(rules, host, is_proc)
+        if fuzzy:
+            best = fuzzy[0]
+            # 用最相似的规则继续解析链路与风险
+            matched = {"index": best["index"], "type": best["type"],
+                       "payload": best["payload"], "proxy": best["proxy"]}
+            confidence = "similar"
+            candidates = fuzzy
+        else:
+            return {"ok": True, "target": host, "isProcess": is_proc,
+                    "totalRules": len(rules), "matched": None, "confidence": "none",
+                    "candidates": [], "steps": [], "risk": "unknown"}
+    else:
+        confidence = "exact"
+        candidates = [{"index": matched["index"], "score": 100, "type": matched["type"],
+                       "payload": matched["payload"], "proxy": matched["proxy"]}]
+
+    suggestion = None
+    if matched["type"] in ("Match", "MATCH"):
+        confidence = "fallback"
+        fuzzy = [c for c in _fuzzy_rules(rules, host, is_proc) if c["score"] >= 50]
+        candidates = fuzzy
+        if fuzzy:
+            top = fuzzy[0]
+            sug_chain = _chain_of(proxies, top["proxy"])
+            suggestion = {"index": top["index"], "type": top["type"],
+                          "payload": top["payload"], "proxy": top["proxy"],
+                          "chain": sug_chain, "score": top["score"]}
 
     outbound = matched["proxy"]
     chain = _chain_of(proxies, outbound)
@@ -949,6 +1045,9 @@ def resolve_path(engine, target):
         "delegateCount": len(delegates),
         "delegates": delegates[:8],
         "risk": risk, "riskReason": reason,
+        "confidence": confidence,
+        "candidates": candidates,
+        "suggestion": suggestion,
         "steps": [matched["type"] + " " + str(matched["payload"] or "")],
     }
 
@@ -2248,10 +2347,12 @@ class Engine(object):
         for g in cfg["groups"]:
             if g["id"] != gid:
                 continue
+            if isinstance(patch, dict) and patch.get("profile"):
+                apply_selection_profile(g, str(patch["profile"]))
             for key in ("enabled", "group", "label", "interval_seconds", "min_healthy",
                         "keep_factor", "keep_offset_ms", "max_workers", "test_url",
                         "verify_url", "verify_top", "timeout_ms", "regions",
-                        "verify_mode", "verify_good_ms", "manual_hold_seconds", "role"):
+                        "verify_mode", "verify_good_ms", "manual_hold_seconds", "role", "profile"):
                 if key not in patch:
                     continue
                 try:
@@ -3126,6 +3227,18 @@ if(el('apps-refresh')) el('apps-refresh').onclick = function(){ loadRoutes(); lo
 document.addEventListener('click', function(e){
   var t = e.target;
   if(!t || !t.closest) return;
+  var pb = t.closest('button[data-profile]');
+  if(pb){
+    var pcard = pb.closest('.gcard');
+    var pgid = pcard ? pcard.dataset.gid : '';
+    if(pgid){
+      post('/api/config', {id: pgid, patch: {profile: pb.dataset.profile}}).then(function(r){
+        if(r && r.ok){ notify('已切换到「' + pb.textContent + '」'); refresh(); }
+        else { notify('切换失败'); }
+      });
+    }
+    return;
+  }
   var b = t.closest('button[data-apprule]');
   if(b){
     var proc = b.dataset.apprule;
@@ -3296,6 +3409,10 @@ function renderPath(d){
     steps.push('<span class="pstep">' + esc(name) + '</span>');
   });
 
+  var conf = d.confidence || 'exact';
+  var confTxt = conf === 'exact' ? '精确命中' : (conf === 'fallback' ? '兜底命中' : (conf === 'similar' ? '相似匹配' : '未命中'));
+  var confCls = conf === 'exact' ? 'ok' : (conf === 'none' ? 'bad' : 'warn');
+
   var riskCls = d.risk === 'low' ? 'ok' : (d.risk === 'high' ? 'bad' : 'warn');
   var riskTxt = d.risk === 'low' ? 'IP 稳定' : (d.risk === 'high' ? 'IP 可能波动' : '需留意');
   var note = '共 ' + d.totalRules + ' 条规则 · 命中第 ' + d.matched.index + ' 条，前 '
@@ -3303,10 +3420,20 @@ function renderPath(d){
   var extra = '直接规则 ' + d.directRules + ' · 委托分组 ' + d.delegateCount;
   if(d.isProcess) extra += ' · 进程规则';
 
-  box.innerHTML = '<div class="pathline">' + steps.join('') + '</div>'
-    + '<div class="pathnote">' + esc(note) + '<span style="opacity:.4"> · </span>' + esc(extra) + '</div>'
+  var html = '<div class="pathline">' + steps.join('') + '</div>'
+    + '<div class="pathnote"><span class="badge ' + confCls + '">' + confTxt + '</span> '
+    + esc(note) + '<span style="opacity:.4"> · </span>' + esc(extra) + '</div>'
     + '<div class="pathrisk"><span class="badge ' + riskCls + '">' + riskTxt + '</span> '
     + '<span class="muted">' + esc(d.riskReason || '') + '</span></div>';
+
+  if(d.suggestion){
+    var sg = d.suggestion;
+    html += '<div class="pathnote" style="margin-top:10px">相似规则：'
+      + '<button class="ghost" data-path-suggest="' + esc(sg.payload) + '">'
+      + esc(String(sg.type)) + ' ' + esc(String(sg.payload)) + '</button>'
+      + ' → ' + esc(sg.chain.join(' → ')) + '</div>';
+  }
+  box.innerHTML = html;
 }
 
 function runPath(){
@@ -3319,6 +3446,16 @@ function runPath(){
 }
 
 if(el('path-run')) el('path-run').onclick = runPath;
+
+document.addEventListener('click', function(e){
+  var t = e.target;
+  if(!t || !t.closest) return;
+  var b = t.closest('button[data-path-suggest]');
+  if(b && el('path-input')){
+    el('path-input').value = b.dataset.pathSuggest;
+    runPath();
+  }
+});
 
 (function(){
   try {
@@ -3811,6 +3948,10 @@ function groupCard(g){
     + '<label>防抖偏移(ms)</label><input data-field="keep_offset_ms" type="number" step="10" min="0">'
     + '<label>最少可用节点</label><input data-field="min_healthy" type="number" min="1">'
     + '<label>验证候选数</label><input data-field="verify_top" type="number" min="0">'
+    + '<label>策略档位</label><div class="row" data-role="profiles" style="gap:6px">'
+    + '<button class="ghost" data-profile="aggressive">激进</button>'
+    + '<button class="ghost" data-profile="balanced">稳健</button>'
+    + '<button class="ghost" data-profile="conservative">保守</button></div>'
     + '<label>角色</label><select data-field="role"><option value="ai">AI 通道（粘滞，只在失效时换）</option><option value="general">通用（按延迟择优）</option></select>'
     + '</div></div>'
     + '<label style="margin-top:12px">地区偏好</label><div class="chips" data-role="regions"></div>'
@@ -3873,6 +4014,10 @@ function fillGroupForm(card, g){
   set('verify_top', c.verify_top || 0);
   set('manual_hold_seconds', Math.round((c.manual_hold_seconds || 1800) / 60));
   set('role', c.role || 'general');
+  var prof = c.profile || 'balanced';
+  card.querySelectorAll('[data-role="profiles"] button').forEach(function(b){
+    b.className = (b.dataset.profile === prof) ? 'primary' : 'ghost';
+  });
 
   var psel = field('verify_provider');
   if(psel){
