@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.1.1-beta.1"
+VERSION = "2.1.1-beta.2"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -2077,8 +2077,10 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
       <div class="row"><select id="ov-group" style="width:180px"></select>
         <button class="primary" id="ov-test">开始测速</button></div>
     </div>
-    <div id="ov-bars" class="bars" style="margin-top:16px"></div>
-    <div class="muted" id="ov-test-msg" style="margin-top:14px"></div>
+    <div class="row" style="margin-top:16px;gap:12px">
+      <span id="ov-result" style="font-size:26px;font-weight:600;letter-spacing:-.02em">—</span>
+      <span id="ov-stab" class="badge" hidden></span>
+    </div>
   </div>
 
   <div class="card">
@@ -2641,26 +2643,38 @@ function loadOverview(){
 if(el('ov-test')) el('ov-test').onclick = function(){
   var clash = !!window.__ovClash;
   var gid = el('ov-group').value;
-  if(clash && !gid){ el('ov-test-msg').textContent = '没有可用分组'; return; }
+  if(clash && !gid){ el('ov-result').textContent = '无可用分组'; return; }
   el('ov-test').disabled = true;
-  el('ov-test-msg').textContent = '测速中…（串行 3 次）';
-  el('ov-bars').innerHTML = '';
+  el('ov-result').textContent = '测速中…';
+  el('ov-stab').hidden = true;
 
   var url = clash ? ('/api/latency?id=' + encodeURIComponent(gid)) : '/api/net-latency';
   get(url).then(function(d){
     el('ov-test').disabled = false;
-    if(!d.ok){ el('ov-test-msg').textContent = d.error || '测速失败'; return; }
-    var max = 1;
-    (d.samples || []).forEach(function(x){ if(x && x > max) max = x; });
-    el('ov-bars').innerHTML = (d.samples || []).map(function(x){
-      var h = Math.max(8, Math.round(((x || max) / max) * 56));
-      return '<div class="bar" style="height:' + h + 'px' + (x ? '' : ';background:#f0d9d7') + '"></div>';
-    }).join('');
-    el('ov-delay').textContent = d.avg ? (d.avg + ' ms') : '—';
-    el('ov-delay-foot').textContent = '抖动 ' + (d.jitter || 0) + ' ms · ' + d.ok_count + '/3 成功';
-    el('ov-test-msg').textContent = (clash ? d.node : '系统 VPN 直连') + ' · 最小 ' + (d.min || '-')
-      + ' / 平均 ' + (d.avg || '-') + ' / 最大 ' + (d.max || '-');
-  }).catch(function(){ el('ov-test').disabled = false; el('ov-test-msg').textContent = '请求失败'; });
+    if(!d.ok){
+      el('ov-result').textContent = d.error || '测速失败';
+      return;
+    }
+    el('ov-result').textContent = (d.avg || '—') + ' ms';
+
+    var jitter = d.jitter || 0;
+    var okCount = d.ok_count || 0;
+    var avg = d.avg || 0;
+    var stable = okCount === 3 && jitter <= Math.max(30, Math.round(avg * 0.25));
+    var mid = okCount === 3 && jitter <= Math.max(80, Math.round(avg * 0.6));
+
+    var badge = el('ov-stab');
+    badge.hidden = false;
+    if(stable){ badge.textContent = '稳定'; badge.className = 'badge ok'; }
+    else if(mid){ badge.textContent = '一般'; badge.className = 'badge warn'; }
+    else { badge.textContent = '不稳定'; badge.className = 'badge bad'; }
+
+    el('ov-delay').textContent = (d.avg || '—') + ' ms';
+    if(el('ov-delay-foot')) el('ov-delay-foot').textContent = '';
+  }).catch(function(){
+    el('ov-test').disabled = false;
+    el('ov-result').textContent = '请求失败';
+  });
 };
 
 document.addEventListener('click', function(e){
