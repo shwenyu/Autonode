@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "3.0.0-alpha.10"
+VERSION = "3.0.0-alpha.11"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -1113,10 +1113,11 @@ def sync_subscription(engine):
         return
 
     if prev != cur:
-        # 切换前保存旧订阅的绑定快照
+        # 切换前保存旧订阅的绑定与规则快照
         engine.cfg.setdefault("sub_bindings", {})[prev] = {
             g["id"]: g.get("group") for g in engine.cfg.get("groups") or []
         }
+        engine.cfg.setdefault("sub_routes", {})[prev] = list(engine.cfg.get("routes") or [])
         names = _selector_names(proxies)
         mem = (engine.cfg.get("sub_bindings") or {}).get(cur) or {}
         changed = 0
@@ -1130,21 +1131,49 @@ def sync_subscription(engine):
                 if runner:
                     runner.cfg = g
                 changed += 1
+        # 规则：优先用该订阅自己的记忆；没有就用当前的并把失效目标迁移到已绑定分组
+        valid_targets = set(names) | {"DIRECT", "REJECT"}
+        fallback = next((g.get("group") for g in engine.cfg.get("groups")
+                         if g.get("enabled")), (engine.cfg.get("groups") or [{}])[0].get("group"))
+        bucket = (engine.cfg.get("sub_routes") or {}).get(cur)
+        if bucket is None:
+            new_routes = [dict(r) for r in (engine.cfg.get("routes") or [])]
+        else:
+            new_routes = [dict(r) for r in bucket]
+        retargeted = 0
+        for r in new_routes:
+            if r.get("target") not in valid_targets and fallback:
+                r["target"] = fallback
+                retargeted += 1
+        engine.cfg["routes"] = new_routes
+
         engine.sub_uid = cur
         engine.cfg["sub_bindings"][cur] = {
             g["id"]: g.get("group") for g in engine.cfg.get("groups") or []
         }
+        engine.cfg.setdefault("sub_routes", {})[cur] = [dict(r) for r in new_routes]
         save_config(engine.cfg)
         engine.bump_epoch("subscription-restore")
-        record_op("subscription", "restored", {"uid": cur, "rebound": changed})
-        log("[订阅] 已切到 %s，自动恢复绑定（%d 个分组）" % (cur, changed))
+        record_op("subscription", "restored",
+                  {"uid": cur, "rebound": changed, "routes": len(new_routes),
+                   "retargeted": retargeted})
+        log("[订阅] 已切到 %s，恢复绑定 %d 个分组、%d 条规则（迁移失效目标 %d 条）"
+            % (cur, changed, len(new_routes), retargeted))
         return
 
-    # 稳定状态下持续记录当前绑定
+    # 稳定状态下持续记录当前绑定与规则
     binds = engine.cfg.setdefault("sub_bindings", {})
     snapshot = {g["id"]: g.get("group") for g in engine.cfg.get("groups") or []}
+    routes = [dict(r) for r in (engine.cfg.get("routes") or [])]
+    routes_store = engine.cfg.setdefault("sub_routes", {})
+    dirty = False
     if binds.get(cur) != snapshot:
         binds[cur] = snapshot
+        dirty = True
+    if routes_store.get(cur) != routes:
+        routes_store[cur] = routes
+        dirty = True
+    if dirty:
         save_config(engine.cfg)
 
 
@@ -4926,6 +4955,10 @@ class Handler(BaseHTTPRequestHandler):
                     if val and tgt:
                         clean.append({"type": typ, "value": val, "target": tgt})
                 self.engine.cfg["routes"] = clean
+                cur_uid = current_subscription().get("uid", "")
+                if cur_uid:
+                    self.engine.cfg.setdefault("sub_routes", {})[cur_uid] = [
+                        dict(r) for r in clean]
                 save_config(self.engine.cfg)
             return self._send(200, json.dumps({"ok": True,
                                                "routes": self.engine.cfg.get("routes", [])},
