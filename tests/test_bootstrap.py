@@ -39,9 +39,10 @@ def test_first_run_discovers():
         "直连组": {"type": "Selector", "now": "DIRECT"},
     })
     m.sync_subscription(eng)
-    assert len(eng.cfg["groups"]) == 3, eng.cfg["groups"]
+    # 只纳管 Selector（URLTest/Fallback 由内核自己选，纳管会互相抢）
+    assert len(eng.cfg["groups"]) == 1, eng.cfg["groups"]
     names = [g["group"] for g in eng.cfg["groups"]]
-    assert "CyberGuard" in names and "直连组" not in names, names
+    assert names == ["CyberGuard"], names
 
 if __name__ == "__main__":
     test_first_run_discovers()
