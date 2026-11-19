@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "3.0.0-alpha.11"
+VERSION = "3.0.0-alpha.12"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -833,29 +833,112 @@ def sub_poller(engine):
             pass
 
 
+def write_subswitch_state(state):
+    _ensure_state_dir()
+    try:
+        with open(os.path.join(STATE_DIR, "subswitch.json"), "w", encoding="utf-8") as fh:
+            json.dump(state, fh, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
 def switch_subscription(engine, uid):
-    """切换当前订阅（需要重启 Verge 才会生效）。"""
+    """切换当前订阅：预检 -> 备份 -> 退出 -> 写入 -> 启动 -> 验证 -> 失败回滚。"""
+    steps = []
+
+    def rec(step, ok, detail=""):
+        steps.append({"step": step, "ok": bool(ok), "detail": detail})
+        record_op("subscription", step, {"uid": uid, "ok": bool(ok), "detail": detail})
+
+    def fail(msg):
+        rec("failed", False, msg)
+        write_subswitch_state({"ok": False, "uid": uid, "error": msg, "steps": steps})
+        return {"ok": False, "error": msg, "steps": steps}
+
+    if not IS_MAC:
+        return {"ok": False, "error": "该功能仅支持 macOS + Clash Verge"}
+
     path = _profiles_path()
     if not path or not os.path.exists(path):
-        return {"ok": False, "error": "找不到 profiles.yaml"}
+        return fail("找不到 profiles.yaml")
     try:
         text = open(path, encoding="utf-8").read()
     except OSError as exc:
-        return {"ok": False, "error": str(exc)}
+        return fail("读取 profiles.yaml 失败：%s" % exc)
     if not re.search(r"^- uid:\s*%s\s*$" % re.escape(uid), text, re.M):
-        return {"ok": False, "error": "订阅不存在"}
-    shutil.copy2(path, path + ".bak-autonode")
-    new_text = re.sub(r"^current:\s*\S+\s*$", "current: %s" % uid, text, count=1, flags=re.M)
-    # 先退出 Verge，避免它退出时覆盖我们的修改
+        return fail("订阅不存在")
+    mcur = re.search(r"^current:\s*(\S+)\s*$", text, re.M)
+    cur_before = mcur.group(1) if mcur else ""
+    rec("precheck", True, "目标 %s，当前 %s" % (uid, cur_before))
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    bak = "%s.bak-autonode-%s" % (path, stamp)
+    try:
+        shutil.copy2(path, bak)
+        rec("backup", True, os.path.basename(bak))
+    except OSError as exc:
+        return fail("备份失败：%s" % exc)
+
     subprocess.run(["pkill", "-TERM", "-f", "Clash Verge.app/Contents/MacOS/clash-verge"],
                    capture_output=True)
-    time.sleep(4)
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(new_text)
+    deadline = time.time() + 15
+    while time.time() < deadline and controller_alive(engine.cfg):
+        time.sleep(0.5)
+    rec("quit", True)
+
+    try:
+        new_text = re.sub(r"^current:\s*\S+\s*$", "current: %s" % uid,
+                          text, count=1, flags=re.M)
+        tmp = path + ".tmp-autonode"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(new_text)
+        os.replace(tmp, path)
+        rec("write", True)
+    except OSError as exc:
+        return fail("写入失败：%s" % exc)
+
     subprocess.run(["open", "-b", "io.github.clash-verge-rev.clash-verge-rev"],
                    capture_output=True)
-    record_op("subscription", "activated", {"uid": uid})
-    return {"ok": True, "uid": uid}
+
+    ok_alive = False
+    deadline = time.time() + 45
+    while time.time() < deadline:
+        if controller_alive(engine.cfg):
+            ok_alive = True
+            break
+        time.sleep(1)
+    rec("start", ok_alive)
+
+    verified = False
+    cur_now = ""
+    try:
+        cur_now = (re.search(r"^current:\s*(\S+)\s*$",
+                             open(path, encoding="utf-8").read(), re.M) or [None, ""])[1] or ""
+    except OSError:
+        pass
+    if ok_alive:
+        try:
+            px = api(controller_ctx(engine.cfg), "GET", "/proxies", timeout=8).get("proxies", {})
+            verified = bool(px)
+        except Exception:
+            verified = False
+    rec("verify", verified and cur_now == uid, "订阅=%s 内核=%s" % (cur_now, "有分组" if verified else "无"))
+
+    if not (ok_alive and verified and cur_now == uid):
+        try:
+            shutil.copy2(bak, path)
+            subprocess.run(["open", "-b", "io.github.clash-verge-rev.clash-verge-rev"],
+                           capture_output=True)
+            rec("rollback", True, cur_before)
+        except OSError as exc:
+            rec("rollback", False, str(exc))
+        return fail("切换后验证失败，已回滚到原订阅")
+
+    engine.bump_epoch("subscription-switch")
+    engine.sub_uid = ""
+    rec("done", True)
+    write_subswitch_state({"ok": True, "uid": uid, "steps": steps})
+    return {"ok": True, "uid": uid, "steps": steps}
 
 
 def _norm_target(q):
@@ -3507,10 +3590,17 @@ document.addEventListener('click', function(e){
   if(!b) return;
   var uid = b.dataset.subAct;
   askModal('切换订阅', '会退出并重启 Clash Verge，约 15–20 秒；切换后分组与规则随新订阅变化。', '切换', function(){
+    notify('切换中，最长约 60 秒…');
+    var pages = document.querySelectorAll('#subs-body button');
+    pages.forEach(function(b){ b.disabled = true; });
     post('/api/subscriptions/activate', {uid: uid}).then(function(r){
-      if(!r.ok){ notify('切换失败：' + (r.error || '')); return; }
-      notify('已切换，正在重启客户端…');
-      setTimeout(function(){ location.reload(); }, 18000);
+      pages.forEach(function(b){ b.disabled = false; });
+      if(!r.ok){ notify('切换失败：' + (r.error || '') + '（已回滚）'); return; }
+      notify('切换完成，正在刷新…');
+      setTimeout(function(){ location.reload(); }, 2500);
+    }).catch(function(){
+      pages.forEach(function(b){ b.disabled = false; });
+      notify('切换请求超时，请稍后刷新查看');
     });
   });
 });
