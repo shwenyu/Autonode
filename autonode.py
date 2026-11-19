@@ -1945,7 +1945,15 @@ def run_group(engine, g, dry_run=False, runner=None):
         return res
 
     try:
-        current, current_ms, candidates, flag, total_nodes, stats = evaluate(ctx, g)
+        try:
+            current, current_ms, candidates, flag, total_nodes, stats = evaluate(ctx, g)
+        except Exception as exc:
+            msg = str(exc)
+            if "404" in msg or "Resource not found" in msg:
+                msg = "绑定分组「%s」在当前订阅中不存在，请在分组卡片点「重新绑定」" % g["group"]
+            res.update(action="skip", message=msg)
+            log("[%s] %s" % (g["label"], msg))
+            return res
     except Exception as exc:
         res.update(action="error", message=str(exc))
         log("[%s] 测速失败 %s" % (g["label"], exc))
@@ -3949,12 +3957,18 @@ function groupCard(g){
     + '<button class="iconbtn" data-act="collapse" title="收起/展开">'
     + '<svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>'
     + '<span class="gname">'+esc(g.label)+'</span> <span class="badge" data-role="role" style="display:none"></span>'
+    + (g.invalid ? ' <span class="badge bad">绑定失效</span>' : '')
     + ' <span class="gsum" data-role="summary"></span></div>'
     + '<div class="row"><button data-act="run">立即检测</button>'
     + '<button data-act="toggle" class="ghost">暂停</button>'
     + '<button data-act="remove" class="ghost">停止纳管</button></div></div>'
     + '<div class="gbody">'
     + '<div class="muted" data-role="scope" style="margin-top:8px;font-size:11.5px"></div>'
+    + (g.invalid
+        ? '<div class="row" style="margin-top:10px;gap:8px"><span class="badge bad">当前订阅没有这个分组</span>'
+          + '<select data-role="rebind-sel" style="width:210px"></select>'
+          + '<button data-act="rebind">重新绑定</button></div>'
+        : '')
     + '<div class="grid" style="margin-top:14px">'
     + '<div><div class="muted">当前节点</div><div class="big mono" data-role="current">-</div>'
     + '<div class="muted" data-role="meta">-</div><div class="muted" data-role="last">-</div></div>'
@@ -4000,6 +4014,18 @@ function applyCollapse(card, gid){
   if(!card) return;
   var map = collapsedMap();
   card.classList.toggle('collapsed', !!map[gid]);
+}
+
+function loadRebindOptions(card){
+  var sel = card.querySelector('[data-role="rebind-sel"]');
+  if(!sel) return;
+  get('/api/groups/available').then(function(d){
+    if(!d || !d.ok) return;
+    sel.innerHTML = (d.groups || []).map(function(g){
+      var q = String(g.name).replace(/&/g,'&amp;').replace(/"/g,'&quot;');
+      return '<option value="' + q + '">' + esc(g.name) + ' (' + esc(g.type) + ')</option>';
+    }).join('');
+  }).catch(function(){});
 }
 
 function loadGroupScope(card, gid){
@@ -4099,6 +4125,7 @@ function renderGroups(s){
       applyCollapse(card, g.id);
       loadRegionStat(card, g.id);
       loadGroupScope(card, g.id);
+      if(g.invalid) loadRebindOptions(card);
     });
   }
 }
@@ -4154,6 +4181,17 @@ document.addEventListener('click', function(e){
     map[gid] = !map[gid];
     saveCollapsed(map);
     card.classList.toggle('collapsed', !!map[gid]);
+  }
+  else if(act==='rebind'){
+    var sel2 = card.querySelector('[data-role="rebind-sel"]');
+    var ng = sel2 ? sel2.value : '';
+    if(!ng){ notify('先选一个目标分组'); return; }
+    post('/api/groups/bind', {id: gid, group: ng, migrateRoutes: true}).then(function(r){
+      if(r && r.ok){
+        notify('已绑定到 ' + ng + (r.routesMigrated ? '，迁移 ' + r.routesMigrated + ' 条规则' : ''));
+        refresh();
+      } else notify('绑定失败：' + ((r && r.error) || ''));
+    });
   }
   else if(act==='allregions'){
     card.querySelectorAll('[data-role="regions"] input').forEach(function(i){ i.checked = true; });
@@ -4579,13 +4617,22 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps(body, ensure_ascii=False))
 
         if path == "/api/status":
+            try:
+                _px = api(controller_ctx(eng.cfg), "GET", "/proxies", timeout=6).get("proxies", {})
+            except Exception:
+                _px = {}
+            try:
+                _px = api(controller_ctx(eng.cfg), "GET", "/proxies", timeout=6).get("proxies", {})
+            except Exception:
+                _px = {}
             groups = []
             for gid, runner in eng.runners.items():
                 snap = runner.snapshot()
                 snap["id"] = gid
                 snap["label"] = runner.cfg.get("label", gid)
                 groups.append({"id": gid, "label": runner.cfg.get("label", gid),
-                               "status": snap, "config": runner.cfg})
+                               "status": snap, "config": runner.cfg,
+                               "invalid": bool(_px) and runner.cfg["group"] not in _px})
             ctl = dict(eng.controller or {})
             ok = controller_alive(eng.cfg)
             prev = getattr(eng, "_ctl_ok", None)
@@ -4954,6 +5001,52 @@ class Handler(BaseHTTPRequestHandler):
                 if gid in (None, "", rid):
                     runner.run(block=False)
             return self._send(200, json.dumps({"ok": True}))
+        if path == "/api/groups/bind":
+            gid = payload.get("id")
+            new_group = str(payload.get("group") or "").strip()
+            migrate = bool(payload.get("migrateRoutes"))
+            runner = self.engine.runners.get(gid)
+            if runner is None:
+                return self._send(404, json.dumps({"ok": False, "error": "分组不存在"},
+                                                  ensure_ascii=False))
+            if not new_group:
+                return self._send(400, json.dumps({"ok": False, "error": "缺少目标分组"},
+                                                  ensure_ascii=False))
+            ctx = controller_ctx(self.engine.cfg)
+            try:
+                px = api(ctx, "GET", "/proxies", timeout=8).get("proxies", {})
+            except Exception as exc:
+                return self._send(200, json.dumps({"ok": False, "error": str(exc)},
+                                                  ensure_ascii=False))
+            info = px.get(new_group)
+            if not info or info.get("type") not in ("Selector", "URLTest", "Fallback"):
+                return self._send(422, json.dumps({"ok": False, "error": "目标不是可管理分组"},
+                                                  ensure_ascii=False))
+            old_group = runner.cfg.get("group")
+            cfg = json.loads(json.dumps(self.engine.cfg))
+            for g in cfg.get("groups") or []:
+                if g.get("id") == gid:
+                    if g.get("label") == old_group:
+                        g["label"] = new_group
+                    g["group"] = new_group
+            migrated = 0
+            if migrate and old_group and old_group != new_group:
+                for r in cfg.get("routes") or []:
+                    if r.get("target") == old_group:
+                        r["target"] = new_group
+                        migrated += 1
+            self.engine.cfg = cfg
+            save_config(cfg)
+            runner.cfg["group"] = new_group
+            if runner.cfg.get("label") == old_group:
+                runner.cfg["label"] = new_group
+            runner.last_detail = {"action": "bound", "message": "已绑定到 " + new_group}
+            self.engine.bump_epoch("group-rebind")
+            record_op("group", "rebound", {"id": gid, "from": old_group,
+                                           "to": new_group, "routes": migrated})
+            return self._send(200, json.dumps({"ok": True, "group": new_group,
+                                               "routesMigrated": migrated},
+                                              ensure_ascii=False))
         if path == "/api/v2/config":
             expected = payload.get("expectedRevision")
             patch = payload.get("patch") or {}
@@ -4992,6 +5085,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/config":
             gid = payload.get("id")
             patch = payload.get("patch") or {}
+            if isinstance(patch, dict) and patch.get("enabled"):
+                for g in self.engine.cfg.get("groups") or []:
+                    if g.get("id") == gid:
+                        continue
+                    if g.get("enabled") and g.get("group") == next(
+                            (x.get("group") for x in self.engine.cfg["groups"]
+                             if x.get("id") == gid), None):
+                        return self._send(409, json.dumps({
+                            "ok": False,
+                            "error": "「%s」已由另一个分组管理，不能同时启用" % g.get("group")},
+                            ensure_ascii=False))
             updated = self.engine.update_group(gid, patch)
             return self._send(200, json.dumps({"ok": bool(updated), "config": updated}, ensure_ascii=False))
         return self._send(404, json.dumps({"error": "not found"}))
