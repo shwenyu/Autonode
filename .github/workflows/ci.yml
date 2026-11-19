@@ -35,6 +35,8 @@ jobs:
           python tests/test_dryrun.py
           python tests/test_vpn_tick.py
           python tests/test_region.py
+          python tests/test_bindings.py
+          python tests/test_bootstrap.py
           python tests/test_minhealthy.py
           python tests/test_vpn_profile.py
           python tests/test_targets.py
