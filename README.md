@@ -69,6 +69,26 @@ Clash Verge / ClashX / Stash / Clash for Windows / mihomo —— 通过 `externa
 当前处于 3.0 alpha：统一运行快照、运行代次、配置 revision、操作记录、导航重构（概览/策略/资源/网络/观察）。
 详见 [docs/ROADMAP-3.0.md](docs/ROADMAP-3.0.md)。
 
+## 兼容性
+
+| 客户端 | 支持 |
+|---|---|
+| Clash Verge Rev（macOS / Windows / Linux） | 完整（分组、规则模板、订阅切换） |
+| mihomo 独立进程 | 分组选优可用；规则模板需手动指定 |
+| ClashX / ClashX Pro | 分组选优可用（自动探测配置目录） |
+| 其他 Clash 内核 | 通过 TCP 控制器（9090 等）只读接管选优 |
+
+自动探测：配置目录候选覆盖 `~/.config/clash`、`~/.config/mihomo`、ClashX、Verge 各平台路径；控制器优先 unix socket，其次常见 TCP 端口。
+写模板、切订阅这类能力依赖 Clash Verge 的 `profiles.yaml` 结构，其他客户端会自动降级为只读或提示。
+
+## 订阅记忆
+
+每个订阅的「纳管分组绑定」会按订阅 uid 记住：
+
+- 切订阅后自动恢复该订阅上次的绑定
+- 没有记忆时按角色关键词自动匹配（AI → 含 AI/GPT 的分组；通用 → 手动选择类分组）
+- 都匹配不到才提示「绑定失效」，由你手动选
+
 ## 安全
 
 - 控制台只监听 `127.0.0.1`，校验 `Host`/`Origin`，防止 CSRF 与 DNS rebinding

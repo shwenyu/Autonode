@@ -489,6 +489,13 @@ CLASH_DIR_CANDIDATES = [
     "~/.local/share/io.github.clash-verge-rev.clash-verge-rev",
     "~/.config/io.github.clash-verge-rev.clash-verge-rev",
     "~/AppData/Roaming/io.github.clash-verge-rev.clash-verge-rev",
+    # 其他常见客户端
+    "~/Library/Application Support/clash-verge",
+    "~/Library/Application Support/ClashX",
+    "~/.config/clash",
+    "~/.config/mihomo",
+    "~/AppData/Roaming/clash",
+    "~/AppData/Roaming/mihomo",
 ]
 
 SOCKET_GLOBS = [
@@ -496,6 +503,9 @@ SOCKET_GLOBS = [
     "/var/tmp/verge/verge-mihomo.sock",
     "/tmp/verge-mihomo.sock",
     "/tmp/verge/*.sock",
+    "/tmp/mihomo.sock",
+    "/tmp/clash*.sock",
+    "~/.config/mihomo/*.sock",
 ]
 
 
@@ -1052,8 +1062,95 @@ def resolve_path(engine, target):
     }
 
 
+def _selector_names(proxies):
+    return [n for n, i in proxies.items()
+            if i.get("type") in ("Selector", "URLTest", "Fallback") and n.upper() != "GLOBAL"]
+
+
+def _auto_match(role, names):
+    """没记忆时的兜底匹配：先按角色关键词，再按常见命名，最后取第一个。"""
+    if role == "ai":
+        for n in names:
+            up = n.upper()
+            if any(k in up for k in ("AI", "GPT", "OPENAI", "CLAUDE")):
+                return n
+    for n in names:
+        if any(k in n for k in ("手动", "选择", "Select", "select")):
+            return n
+    return names[0] if names else None
+
+
+def sync_subscription(engine):
+    """订阅切换时自动恢复该订阅的记忆绑定；首次运行自动纳管。"""
+    now = time.time()
+    if now - getattr(engine, "_sub_sync_at", 0) < 4:
+        return
+    engine._sub_sync_at = now
+    cur = current_subscription().get("uid", "")
+    if not cur:
+        return
+    ctx = controller_ctx(engine.cfg)
+    try:
+        proxies = api(ctx, "GET", "/proxies", timeout=6).get("proxies", {})
+    except Exception:
+        return
+
+    # 首次运行：没有任何纳管分组时自动发现
+    if not (engine.cfg.get("groups") or []):
+        found = engine._bootstrap_groups()
+        if found:
+            engine.cfg["groups"] = found
+            save_config(engine.cfg)
+            for g in found:
+                engine.runners[g["id"]] = Runner(engine, g)
+            engine.bump_epoch("bootstrap")
+            record_op("groups", "bootstrap", {"count": len(found)})
+        return
+
+    prev = getattr(engine, "sub_uid", "")
+    if not prev:
+        engine.sub_uid = cur
+        return
+
+    if prev != cur:
+        # 切换前保存旧订阅的绑定快照
+        engine.cfg.setdefault("sub_bindings", {})[prev] = {
+            g["id"]: g.get("group") for g in engine.cfg.get("groups") or []
+        }
+        names = _selector_names(proxies)
+        mem = (engine.cfg.get("sub_bindings") or {}).get(cur) or {}
+        changed = 0
+        for g in engine.cfg.get("groups") or []:
+            want = mem.get(g["id"])
+            if not want or want not in proxies:
+                want = _auto_match(g.get("role", "general"), names)
+            if want and g.get("group") != want:
+                g["group"] = want
+                runner = engine.runners.get(g["id"])
+                if runner:
+                    runner.cfg = g
+                changed += 1
+        engine.sub_uid = cur
+        engine.cfg["sub_bindings"][cur] = {
+            g["id"]: g.get("group") for g in engine.cfg.get("groups") or []
+        }
+        save_config(engine.cfg)
+        engine.bump_epoch("subscription-restore")
+        record_op("subscription", "restored", {"uid": cur, "rebound": changed})
+        log("[订阅] 已切到 %s，自动恢复绑定（%d 个分组）" % (cur, changed))
+        return
+
+    # 稳定状态下持续记录当前绑定
+    binds = engine.cfg.setdefault("sub_bindings", {})
+    snapshot = {g["id"]: g.get("group") for g in engine.cfg.get("groups") or []}
+    if binds.get(cur) != snapshot:
+        binds[cur] = snapshot
+        save_config(engine.cfg)
+
+
 def build_runtime(engine):
     """统一运行快照：订阅、内核、TUN、分组当前选择、能力与新鲜度。"""
+    sync_subscription(engine)
     now = time.time()
     sub = current_subscription()
     ok = controller_alive(engine.cfg)
@@ -4617,6 +4714,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps(body, ensure_ascii=False))
 
         if path == "/api/status":
+            sync_subscription(eng)
             try:
                 _px = api(controller_ctx(eng.cfg), "GET", "/proxies", timeout=6).get("proxies", {})
             except Exception:
@@ -5041,6 +5139,12 @@ class Handler(BaseHTTPRequestHandler):
             if runner.cfg.get("label") == old_group:
                 runner.cfg["label"] = new_group
             runner.last_detail = {"action": "bound", "message": "已绑定到 " + new_group}
+            cur_uid = current_subscription().get("uid", "")
+            if cur_uid:
+                self.engine.cfg.setdefault("sub_bindings", {})[cur_uid] = {
+                    x["id"]: x.get("group") for x in self.engine.cfg.get("groups") or []
+                }
+                save_config(self.engine.cfg)
             self.engine.bump_epoch("group-rebind")
             record_op("group", "rebound", {"id": gid, "from": old_group,
                                            "to": new_group, "routes": migrated})
