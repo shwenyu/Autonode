@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "3.0.4"
+VERSION = "3.0.5"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -2195,10 +2195,10 @@ def evaluate(ctx, g):
             else:
                 kept.append(n)
         nodes = kept
-    targets = [n for n in nodes if region_priority(n, g["regions"]) is not None]
     pinned = (g.get("pinned_node") or "").strip()
-    if pinned and (pinned in all_nodes or pinned in nodes):
-        targets = [pinned]
+    if pinned and pinned in all_nodes and pinned not in nodes:
+        nodes.append(pinned)          # 钉住的节点不受排除词影响
+    targets = [n for n in nodes if region_priority(n, g["regions"]) is not None or n == pinned]
     stats = {"all": len(all_nodes), "nodes": len(nodes), "region": len(targets),
              "probed": 0, "verify_failed": 0, "excluded": excluded}
 
@@ -2219,10 +2219,15 @@ def evaluate(ctx, g):
                            "ms": ms, "verify_ms": None})
     candidates.sort(key=lambda x: (x["ms"], x["priority"]))
     stats["probed"] = len(candidates)
-    if pinned and not candidates:
-        # 钉住的节点测速失败也要保留为唯一候选（可能是测速地址被该节点屏蔽）
-        candidates = [{"name": pinned, "region": "未知", "priority": 999,
-                       "ms": 9999, "verify_ms": None}]
+    if pinned:
+        # 钉住的节点排到最前；测速失败也保留（可能是测速地址被该节点屏蔽）
+        cand = next((c for c in candidates if c["name"] == pinned), None)
+        if cand is None and pinned in all_nodes:
+            cand = {"name": pinned, "region": "未知", "priority": 999,
+                    "ms": 9999, "verify_ms": None}
+            candidates.append(cand)
+        if cand is not None:
+            candidates = [cand] + [c for c in candidates if c is not cand]
 
     # 第二阶段：目标验证
     # 关键：必须**串行**探测。同一出口 IP 并发打 chatgpt.com 会被 Cloudflare 判为异常
@@ -2400,7 +2405,10 @@ def run_group(engine, g, dry_run=False, runner=None):
         log("[%s] %s" % (g["label"], msg))
         return res
 
+    pin = (g.get("pinned_node") or "").strip()
     best = candidates[0]
+    if pin:
+        best = next((c for c in candidates if c["name"] == pin), best)
     best_score = best["verify_ms"] or best["ms"]
 
     cur_verify = None
@@ -2429,6 +2437,8 @@ def run_group(engine, g, dry_run=False, runner=None):
 
     tag = "[%s] " % g["label"]
     if keep and _is_excluded(current):
+        keep = False
+    if pin and current != pin:
         keep = False
     if keep:
         msg = "保持 %s (%s)，最优 %s (%s)" % (current, fmt_ms(cur_score), best["name"], fmt_ms(best_score))
@@ -4555,7 +4565,8 @@ function updateGroups(s){
     card.querySelector('[data-role="msg"]').textContent = d.message || '-';
     var rows = (st.candidates||[]).map(function(c){
       var q = c.name.replace(/"/g,'&quot;');
-      return '<tr><td class="mono">'+esc(c.name)+'</td><td>'+esc(c.region)+'</td><td>'+c.ms+' ms</td><td>'
+      var pinTag = (g.config.pinned_node === c.name) ? ' <span class="badge">钉住</span>' : '';
+      return '<tr><td class="mono">'+esc(c.name)+pinTag+'</td><td>'+esc(c.region)+'</td><td>'+c.ms+' ms</td><td>'
         + (c.verify_ms? c.verify_ms+' ms':'-') + '</td>'
         + '<td><button data-act="switch" data-node="'+q+'">切换</button></td></tr>';
     }).join('');
