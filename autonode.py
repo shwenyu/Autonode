@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "3.0.0-alpha.14"
+VERSION = "3.0.0-alpha.15"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -2099,7 +2099,7 @@ def evaluate(ctx, g):
 
     candidates = []
     for name, ms in delays.items():
-        pri, region = region_priority(name, g["regions"])
+        pri, region = region_priority(name, g["regions"]) or (999, "未知")
         candidates.append({"name": name, "region": region, "priority": pri,
                            "ms": ms, "verify_ms": None})
     candidates.sort(key=lambda x: (x["ms"], x["priority"]))
