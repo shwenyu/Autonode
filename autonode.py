@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "3.0.1"
+VERSION = "3.0.2"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -4222,7 +4222,7 @@ function groupCard(g){
     + ' <span class="gsum" data-role="summary"></span></div>'
     + '<div class="row"><button data-act="run">立即检测</button>'
     + '<button data-act="toggle" class="ghost">暂停</button>'
-    + (g.config.get("pinned_node")
+    + (g.config.pinned_node
         ? '<button data-act="unpin" class="ghost">取消钉住</button>'
         : '<button data-act="pin" class="ghost">钉住当前</button>')
     + '<button data-act="remove" class="ghost">停止纳管</button></div></div>'
