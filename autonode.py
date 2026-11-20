@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "3.0.0-alpha.15"
+VERSION = "3.0.0-alpha.16"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -2104,6 +2104,10 @@ def evaluate(ctx, g):
                            "ms": ms, "verify_ms": None})
     candidates.sort(key=lambda x: (x["ms"], x["priority"]))
     stats["probed"] = len(candidates)
+    if pinned and not candidates:
+        # 钉住的节点测速失败也要保留为唯一候选（可能是测速地址被该节点屏蔽）
+        candidates = [{"name": pinned, "region": "未知", "priority": 999,
+                       "ms": 9999, "verify_ms": None}]
 
     # 第二阶段：目标验证
     # 关键：必须**串行**探测。同一出口 IP 并发打 chatgpt.com 会被 Cloudflare 判为异常
@@ -2116,7 +2120,7 @@ def evaluate(ctx, g):
         verify_gap = float(g.get("verify_gap_seconds", 1.5))
 
         cur_v = None
-        if current and is_node(current):
+        if current and is_node(current) and (not pinned or current == pinned):
             cur_v = probe_delay(ctx, current, g["verify_url"], vtimeout)
             if mode == "lazy" and cur_v and cur_v <= good_ms:
                 for c in candidates:

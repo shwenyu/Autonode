@@ -39,6 +39,7 @@ jobs:
           python tests/test_bootstrap.py
           python tests/test_route_scope.py
           python tests/test_switch_txn.py
+          python tests/test_pinned.py
           python tests/test_minhealthy.py
           python tests/test_vpn_profile.py
           python tests/test_targets.py
