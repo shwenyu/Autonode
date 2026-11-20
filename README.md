@@ -85,6 +85,14 @@ Clash Verge / ClashX / Stash / Clash for Windows / mihomo —— 通过 `externa
 自动探测：配置目录候选覆盖 `~/.config/clash`、`~/.config/mihomo`、ClashX、Verge 各平台路径；控制器优先 unix socket，其次常见 TCP 端口。
 写模板、切订阅这类能力依赖 Clash Verge 的 `profiles.yaml` 结构，其他客户端会自动降级为只读或提示。
 
+## AI 分组
+
+分组页「创建 AI 分组」一键完成：
+
+- 在当前订阅里创建 `🧲 AI` 客户端分组（包含全部节点）
+- 绑定为 Autonode 的 AI 通道：保守档位、验证 `chatgpt.com`、排除 `香港/直连/5x`
+- 首次运行且订阅无 AI 分组时自动准备
+
 ## 选优控制
 
 每个分组可设置：

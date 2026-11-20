@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "3.0.3"
+VERSION = "3.0.4"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -1188,6 +1188,76 @@ def _auto_match(role, names):
     return names[0] if names else None
 
 
+def create_ai_client_group(engine):
+    """在当前订阅里创建「🧲 AI」客户端分组并绑定，返回结果字典。"""
+    ctx = controller_ctx(engine.cfg)
+    try:
+        px = api(ctx, "GET", "/proxies", timeout=8).get("proxies", {})
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    for g in engine.cfg.get("groups") or []:
+        if g.get("role") == "ai" and g.get("enabled") and g.get("group") in px:
+            return {"ok": True, "already": True, "group": g["group"]}
+    used = set(px.keys())
+    for cg in engine.cfg.get("custom_groups") or []:
+        used.add(cg.get("name"))
+    name = "🧲 AI"
+    if name in used:
+        name = "AutoNode AI"
+        if name in used:
+            return {"ok": False, "error": "分组名已被占用"}
+    best = None
+    for n, info in px.items():
+        if info.get("type") != "Selector" or n.upper() == "GLOBAL":
+            continue
+        nodes = [x for x in (info.get("all") or []) if is_node(x)]
+        if best is None or len(nodes) > len(best[1]):
+            best = (n, nodes)
+    members = best[1] if best else []
+    if len(members) < 1:
+        return {"ok": False, "error": "找不到可用节点"}
+    cur, guid = active_groups_uid(engine.cfg.get("clash_dir", ""))
+    if not guid:
+        return {"ok": False, "error": "当前订阅没有「分组」模板，请在客户端手动创建"}
+    custom = [cg for cg in (engine.cfg.get("custom_groups") or [])
+              if cg.get("name") != name]
+    custom.append({"name": name, "members": members})
+    try:
+        written = write_groups(engine.cfg["clash_dir"], guid, custom)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    engine.cfg["custom_groups"] = custom
+    ai = next((g for g in engine.cfg.get("groups") or []
+               if g.get("role") == "ai" or g.get("id") == "ai"), None)
+    if ai is None:
+        ai = {"id": "ai"}
+        engine.cfg.setdefault("groups", []).append(ai)
+    ai.update({
+        "group": name, "label": name, "enabled": True, "role": "ai",
+        "profile": ai.get("profile") or "conservative",
+        "verify_url": "https://chatgpt.com/cdn-cgi/trace",
+        "verify_top": max(3, int(ai.get("verify_top") or 0)),
+        "exclude_keywords": ai.get("exclude_keywords") or ["香港", "直连", "5x"],
+    })
+    ai = _normalize_group(ai)
+    for i, item in enumerate(engine.cfg["groups"]):
+        if item.get("id") == ai["id"]:
+            engine.cfg["groups"][i] = ai
+    save_config(engine.cfg)
+    runner = engine.runners.get(ai["id"])
+    if runner:
+        runner.cfg = ai
+    if not runner:
+        engine.runners[ai["id"]] = Runner(engine, ai)
+        threading.Thread(target=engine.runners[ai["id"]].loop, daemon=True).start()
+    threading.Thread(target=restart_verge, daemon=True).start()
+    record_op("groups", "ensure-ai", {"name": name, "members": len(members),
+                                      "file": written})
+    log("已创建 AI 分组 %s（成员 %d 个），等待内核重启" % (name, len(members)))
+    return {"ok": True, "created": True, "group": name,
+            "members": len(members), "restarting": True}
+
+
 def sync_subscription(engine):
     """订阅切换时自动恢复该订阅的记忆绑定与规则；首次运行自动纳管。"""
     now = time.time()
@@ -1213,6 +1283,39 @@ def sync_subscription(engine):
                 engine.runners[g["id"]] = Runner(engine, g)
             engine.bump_epoch("bootstrap")
             record_op("groups", "bootstrap", {"count": len(found)})
+            # 首次运行：若订阅里没有可用的 AI 分组，自动创建一个
+            names = _selector_names(proxies)
+            ai_like = [n for n in names
+                       if any(k in n.upper() for k in ("AI", "GPT", "OPENAI"))]
+            bound = {g.get("group") for g in found}
+            free = [n for n in names if n not in bound]
+            if ai_like:
+                name = ai_like[0]
+            elif free:
+                name = free[0]
+            else:
+                name = ""
+            if name:
+                ai = next((g for g in engine.cfg["groups"]
+                           if g.get("role") == "ai" or g.get("id") == "ai"), None)
+                if ai:
+                    ai["group"] = name
+                    ai["label"] = name
+                    ai["role"] = "ai"
+                    ai["enabled"] = True
+                    ai["verify_url"] = "https://chatgpt.com/cdn-cgi/trace"
+                    ai["verify_top"] = max(3, int(ai.get("verify_top") or 0))
+                    ai = _normalize_group(ai)
+                    for i, item in enumerate(engine.cfg["groups"]):
+                        if item.get("id") == ai["id"]:
+                            engine.cfg["groups"][i] = ai
+                    runner = engine.runners.get(ai["id"])
+                    if runner:
+                        runner.cfg = ai
+                    save_config(engine.cfg)
+            else:
+                threading.Thread(target=create_ai_client_group,
+                                 args=(engine,), daemon=True).start()
         return
 
     prev = getattr(engine, "sub_uid", "")
@@ -3016,6 +3119,7 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
       <button id="addbtn">纳管已有分组</button>
       <button id="newgroupbtn" class="ghost">创建客户端分组</button>
       <button id="rescanbtn" class="ghost">重新发现分组</button>
+      <button id="mkaigroup" class="ghost">创建 AI 分组</button>
     </div>
     <div class="muted" id="addmsg" style="margin-top:6px"></div>
   </div>
@@ -3943,6 +4047,26 @@ function loadTun(){
       + ' · 混合端口 ' + (d.mixed_port||'-') + ' · DNS 劫持 ' + ((d.dns_hijack||[]).join(',')||'-');
   }).catch(function(){});
 }
+
+if(el('mkaigroup')) el('mkaigroup').onclick = function(){
+  askModal('创建 AI 分组', '会在当前订阅里创建一个名为「🧲 AI」的分组（含全部节点），然后重启内核。', '创建', function(){
+    notify('正在创建并重启内核…');
+    post('/api/groups/ensure-ai', {}).then(function(r){
+      if(!r || !r.ok){ notify('创建失败：' + ((r && r.error) || '')); return; }
+      if(r.already){ notify('已存在可用的 AI 分组：' + r.group); return; }
+      notify('已创建「' + r.group + '」（' + r.members + ' 个节点），等待内核重启');
+      var tries = 0;
+      var timer = setInterval(function(){
+        tries++;
+        fetch('/api/status', {cache:'no-store'}).then(function(){
+          clearInterval(timer); refresh(); notify('AI 分组已就绪');
+        }).catch(function(){
+          if(tries > 25){ clearInterval(timer); notify('内核重启超时，请稍后刷新'); }
+        });
+      }, 1500);
+    });
+  });
+};
 
 if(el('tun-refresh')) el('tun-refresh').onclick = loadTun;
 if(el('proc-target')) fillProcTargets();
@@ -5289,6 +5413,9 @@ class Handler(BaseHTTPRequestHandler):
             log("创建分组 %s（成员 %d 个），等待内核重启" % (name, len(members)))
             return self._send(200, json.dumps({"ok": True, "file": written, "restarting": True},
                                               ensure_ascii=False))
+        if path == "/api/groups/ensure-ai":
+            res = create_ai_client_group(self.engine)
+            return self._send(200, json.dumps(res, ensure_ascii=False))
         if path == "/api/groups/add":
             g = self.engine.add_group(str(payload.get("name") or ""))
             return self._send(200, json.dumps({"ok": bool(g),
