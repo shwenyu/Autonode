@@ -81,6 +81,14 @@ Clash Verge / ClashX / Stash / Clash for Windows / mihomo —— 通过 `externa
 自动探测：配置目录候选覆盖 `~/.config/clash`、`~/.config/mihomo`、ClashX、Verge 各平台路径；控制器优先 unix socket，其次常见 TCP 端口。
 写模板、切订阅这类能力依赖 Clash Verge 的 `profiles.yaml` 结构，其他客户端会自动降级为只读或提示。
 
+## 选优控制
+
+每个分组可设置：
+
+- **地区偏好**：只在这些地区里选
+- **排除关键词**：节点名含这些词的直接跳过（如 `直连, 5x, 轮换`）
+- **钉住节点**：锁定当前节点，不再自动切换（适合需要固定出口 IP 的场景）
+
 ## ChatGPT 兼容规则
 
 分流规则页右上角「ChatGPT 兼容」：一键补齐

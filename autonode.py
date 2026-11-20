@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "3.0.0-alpha.13"
+VERSION = "3.0.0-alpha.14"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -341,6 +341,10 @@ def _normalize_group(item):
     if not cfg.get("role"):
         cfg["role"] = "ai" if "AI" in label.upper() else "general"
     cfg.setdefault("profile", "balanced")
+    if not isinstance(cfg.get("exclude_keywords"), list):
+        cfg["exclude_keywords"] = []
+    if not isinstance(cfg.get("pinned_node"), str):
+        cfg["pinned_node"] = ""
     if cfg["profile"] not in SELECTION_PROFILES:
         cfg["profile"] = "balanced"
     if cfg["role"] == "ai":
@@ -1179,7 +1183,7 @@ def _auto_match(role, names):
 
 
 def sync_subscription(engine):
-    """订阅切换时自动恢复该订阅的记忆绑定；首次运行自动纳管。"""
+    """订阅切换时自动恢复该订阅的记忆绑定与规则；首次运行自动纳管。"""
     now = time.time()
     if now - getattr(engine, "_sub_sync_at", 0) < 4:
         return
@@ -1193,8 +1197,8 @@ def sync_subscription(engine):
     except Exception:
         return
 
-    # 首次运行：没有任何纳管分组时自动发现
-    if not (engine.cfg.get("groups") or []):
+    groups = engine.cfg.get("groups") or []
+    if not groups:
         found = engine._bootstrap_groups()
         if found:
             engine.cfg["groups"] = found
@@ -1206,73 +1210,71 @@ def sync_subscription(engine):
         return
 
     prev = getattr(engine, "sub_uid", "")
-    if not prev:
-        engine.sub_uid = cur
+    invalid = any(g.get("group") not in proxies for g in groups)
+    need_restore = bool(prev != cur) or invalid
+    if not need_restore:
+        binds = engine.cfg.setdefault("sub_bindings", {})
+        snapshot = {g["id"]: g.get("group") for g in groups}
+        routes = [dict(r) for r in (engine.cfg.get("routes") or [])]
+        store = engine.cfg.setdefault("sub_routes", {})
+        dirty = False
+        if binds.get(cur) != snapshot:
+            binds[cur] = snapshot
+            dirty = True
+        if store.get(cur) != routes:
+            store[cur] = routes
+            dirty = True
+        if dirty:
+            save_config(engine.cfg)
         return
 
-    if prev != cur:
-        # 切换前保存旧订阅的绑定与规则快照
+    # ---------- 需要恢复 ----------
+    if prev and prev != cur:
         engine.cfg.setdefault("sub_bindings", {})[prev] = {
-            g["id"]: g.get("group") for g in engine.cfg.get("groups") or []
+            g["id"]: g.get("group") for g in groups
         }
-        engine.cfg.setdefault("sub_routes", {})[prev] = list(engine.cfg.get("routes") or [])
-        names = _selector_names(proxies)
-        mem = (engine.cfg.get("sub_bindings") or {}).get(cur) or {}
-        changed = 0
-        for g in engine.cfg.get("groups") or []:
-            want = mem.get(g["id"])
-            if not want or want not in proxies:
-                want = _auto_match(g.get("role", "general"), names)
-            if want and g.get("group") != want:
-                g["group"] = want
-                runner = engine.runners.get(g["id"])
-                if runner:
-                    runner.cfg = g
-                changed += 1
-        # 规则：优先用该订阅自己的记忆；没有就用当前的并把失效目标迁移到已绑定分组
-        valid_targets = set(names) | {"DIRECT", "REJECT"}
-        fallback = next((g.get("group") for g in engine.cfg.get("groups")
-                         if g.get("enabled")), (engine.cfg.get("groups") or [{}])[0].get("group"))
-        bucket = (engine.cfg.get("sub_routes") or {}).get(cur)
-        if bucket is None:
-            new_routes = [dict(r) for r in (engine.cfg.get("routes") or [])]
-        else:
-            new_routes = [dict(r) for r in bucket]
-        retargeted = 0
-        for r in new_routes:
-            if r.get("target") not in valid_targets and fallback:
-                r["target"] = fallback
-                retargeted += 1
-        engine.cfg["routes"] = new_routes
+        engine.cfg.setdefault("sub_routes", {})[prev] = [
+            dict(r) for r in (engine.cfg.get("routes") or [])
+        ]
 
-        engine.sub_uid = cur
-        engine.cfg["sub_bindings"][cur] = {
-            g["id"]: g.get("group") for g in engine.cfg.get("groups") or []
-        }
-        engine.cfg.setdefault("sub_routes", {})[cur] = [dict(r) for r in new_routes]
-        save_config(engine.cfg)
-        engine.bump_epoch("subscription-restore")
-        record_op("subscription", "restored",
-                  {"uid": cur, "rebound": changed, "routes": len(new_routes),
-                   "retargeted": retargeted})
-        log("[订阅] 已切到 %s，恢复绑定 %d 个分组、%d 条规则（迁移失效目标 %d 条）"
-            % (cur, changed, len(new_routes), retargeted))
-        return
+    names = _selector_names(proxies)
+    valid_targets = set(names) | {"DIRECT", "REJECT"}
+    mem = (engine.cfg.get("sub_bindings") or {}).get(cur) or {}
+    changed = 0
+    for g in groups:
+        want = mem.get(g["id"])
+        if not want or want not in proxies:
+            want = _auto_match(g.get("role", "general"), names)
+        if want and g.get("group") != want:
+            g["group"] = want
+            runner = engine.runners.get(g["id"])
+            if runner:
+                runner.cfg = g
+            changed += 1
 
-    # 稳定状态下持续记录当前绑定与规则
-    binds = engine.cfg.setdefault("sub_bindings", {})
-    snapshot = {g["id"]: g.get("group") for g in engine.cfg.get("groups") or []}
-    routes = [dict(r) for r in (engine.cfg.get("routes") or [])]
-    routes_store = engine.cfg.setdefault("sub_routes", {})
-    dirty = False
-    if binds.get(cur) != snapshot:
-        binds[cur] = snapshot
-        dirty = True
-    if routes_store.get(cur) != routes:
-        routes_store[cur] = routes
-        dirty = True
-    if dirty:
-        save_config(engine.cfg)
+    bucket = (engine.cfg.get("sub_routes") or {}).get(cur)
+    if bucket is not None:
+        new_routes = [dict(r) for r in bucket]
+    else:
+        new_routes = [dict(r) for r in (engine.cfg.get("routes") or [])]
+    fallback = next((g.get("group") for g in groups if g.get("enabled")),
+                    groups[0].get("group") if groups else "")
+    retargeted = 0
+    for r in new_routes:
+        if r.get("target") not in valid_targets and fallback:
+            r["target"] = fallback
+            retargeted += 1
+    engine.cfg["routes"] = new_routes
+    engine.sub_uid = cur
+    engine.cfg.setdefault("sub_bindings", {})[cur] = {g["id"]: g.get("group") for g in groups}
+    engine.cfg.setdefault("sub_routes", {})[cur] = [dict(r) for r in new_routes]
+    save_config(engine.cfg)
+    engine.bump_epoch("subscription-restore")
+    record_op("subscription", "restored",
+              {"uid": cur, "rebound": changed, "routes": len(new_routes),
+               "retargeted": retargeted})
+    log("[订阅] %s：恢复绑定 %d 个分组、%d 条规则（迁移失效目标 %d 条）"
+        % (cur, changed, len(new_routes), retargeted))
 
 
 def build_runtime(engine):
@@ -2067,9 +2069,23 @@ def evaluate(ctx, g):
     current = group.get("now") or ""
 
     nodes = [n for n in all_nodes if is_node(n)]
+    excl = [str(k).lower() for k in (g.get("exclude_keywords") or []) if str(k).strip()]
+    excluded = 0
+    if excl:
+        kept = []
+        for n in nodes:
+            low = n.lower()
+            if any(k in low for k in excl):
+                excluded += 1
+            else:
+                kept.append(n)
+        nodes = kept
     targets = [n for n in nodes if region_priority(n, g["regions"]) is not None]
+    pinned = (g.get("pinned_node") or "").strip()
+    if pinned and (pinned in all_nodes or pinned in nodes):
+        targets = [pinned]
     stats = {"all": len(all_nodes), "nodes": len(nodes), "region": len(targets),
-             "probed": 0, "verify_failed": 0}
+             "probed": 0, "verify_failed": 0, "excluded": excluded}
 
     delays = {}
 
@@ -2140,8 +2156,10 @@ def _filter_hint(stats):
     region = stats.get("region", 0)
     probed = stats.get("probed", 0)
     parts = []
-    if all_n - nodes:
-        parts.append("非节点 %d" % (all_n - nodes))
+    if stats.get("excluded"):
+        parts.append("关键词排除 %d" % stats["excluded"])
+    if all_n - nodes - stats.get("excluded", 0):
+        parts.append("非节点 %d" % (all_n - nodes - stats.get("excluded", 0)))
     if nodes - region:
         parts.append("地区不匹配 %d" % (nodes - region))
     if region - probed:
@@ -2187,7 +2205,12 @@ def run_group(engine, g, dry_run=False, runner=None):
                candidates=[{k: v for k, v in c.items() if k != "priority"} for c in candidates[:40]],
                total=len(candidates))
 
-    if flag == "current-good":
+    def _is_excluded(name):
+        low = str(name or "").lower()
+        return any(str(k).lower() in low
+                   for k in (g.get("exclude_keywords") or []) if str(k).strip())
+
+    if flag == "current-good" and not _is_excluded(current):
         cur_v = None
         for c in candidates:
             if c["name"] == current:
@@ -2286,6 +2309,8 @@ def run_group(engine, g, dry_run=False, runner=None):
         )
 
     tag = "[%s] " % g["label"]
+    if keep and _is_excluded(current):
+        keep = False
     if keep:
         msg = "保持 %s (%s)，最优 %s (%s)" % (current, fmt_ms(cur_score), best["name"], fmt_ms(best_score))
         res.update(action="keep", message=msg, best=best["name"], best_ms=best_score)
@@ -2595,7 +2620,7 @@ class Engine(object):
             for key in ("enabled", "group", "label", "interval_seconds", "min_healthy",
                         "keep_factor", "keep_offset_ms", "max_workers", "test_url",
                         "verify_url", "verify_top", "timeout_ms", "regions",
-                        "verify_mode", "verify_good_ms", "manual_hold_seconds", "role", "profile"):
+                        "verify_mode", "verify_good_ms", "manual_hold_seconds", "role", "profile", "exclude_keywords", "pinned_node"):
                 if key not in patch:
                     continue
                 try:
@@ -4193,6 +4218,9 @@ function groupCard(g){
     + ' <span class="gsum" data-role="summary"></span></div>'
     + '<div class="row"><button data-act="run">立即检测</button>'
     + '<button data-act="toggle" class="ghost">暂停</button>'
+    + (g.config.get("pinned_node")
+        ? '<button data-act="unpin" class="ghost">取消钉住</button>'
+        : '<button data-act="pin" class="ghost">钉住当前</button>')
     + '<button data-act="remove" class="ghost">停止纳管</button></div></div>'
     + '<div class="gbody">'
     + '<div class="muted" data-role="scope" style="margin-top:8px;font-size:11.5px"></div>'
@@ -4227,6 +4255,7 @@ function groupCard(g){
     + '</div></div>'
     + '<label style="margin-top:12px">地区偏好</label><div class="chips" data-role="regions"></div>'
     + '<div class="muted" data-role="regionstat" style="margin-top:8px;font-size:11.5px"></div>'
+    + '<label>排除关键词</label><input data-field="exclude_keywords" placeholder="逗号分隔，如：直连, 5x, 轮换">'
     + '<div class="row" style="margin-top:12px"><button class="primary" data-act="save">保存设置</button><button class="ghost" data-act="regions">未识别地区…</button><button class="ghost" data-act="allregions">全选地区</button>'
     + '<span class="muted" data-role="save"></span></div></details></div></div>';
 }
@@ -4315,6 +4344,7 @@ function fillGroupForm(card, g){
   set('verify_top', c.verify_top || 0);
   set('manual_hold_seconds', Math.round((c.manual_hold_seconds || 1800) / 60));
   set('role', c.role || 'general');
+  set('exclude_keywords', (c.exclude_keywords || []).join(', '));
   var prof = c.profile || 'balanced';
   card.querySelectorAll('[data-role="profiles"] button').forEach(function(b){
     b.className = (b.dataset.profile === prof) ? 'primary' : 'ghost';
@@ -4414,6 +4444,18 @@ document.addEventListener('click', function(e){
     saveCollapsed(map);
     card.classList.toggle('collapsed', !!map[gid]);
   }
+  else if(act==='pin'){
+    var curNode = (g.status || {}).current;
+    if(!curNode){ notify('当前没有节点'); return; }
+    post('/api/config', {id: gid, patch: {pinned_node: curNode}}).then(function(r){
+      notify(r && r.ok ? ('已钉住 ' + curNode) : '钉住失败'); refresh();
+    });
+  }
+  else if(act==='unpin'){
+    post('/api/config', {id: gid, patch: {pinned_node: ''}}).then(function(r){
+      notify(r && r.ok ? '已取消钉住' : '操作失败'); refresh();
+    });
+  }
   else if(act==='rebind'){
     var sel2 = card.querySelector('[data-role="rebind-sel"]');
     var ng = sel2 ? sel2.value : '';
@@ -4442,6 +4484,7 @@ document.addEventListener('click', function(e){
       verify_top: parseInt(card.querySelector('[data-field="verify_top"]').value,10),
       manual_hold_seconds: parseInt(card.querySelector('[data-field="manual_hold_seconds"]').value,10)*60,
       role: card.querySelector('[data-field="role"]').value,
+      exclude_keywords: (field('exclude_keywords').value || '').split(/[,，\s]+/).filter(Boolean),
       regions: regions
     };
     post('/api/config',{id:gid,patch:patch}).then(function(){
