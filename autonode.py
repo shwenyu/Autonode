@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "3.0.2"
+VERSION = "3.0.3"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -461,6 +461,12 @@ _CONFIG_LOCK = threading.RLock()
 def save_config(cfg):
     with _CONFIG_LOCK:
         os.makedirs(BASE_DIR, exist_ok=True)
+        # 保留上一版，误改/异常时可回退
+        if os.path.exists(CONFIG_FILE):
+            try:
+                shutil.copy2(CONFIG_FILE, CONFIG_FILE + ".bak")
+            except OSError:
+                pass
         tmp = CONFIG_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(cfg, fh, ensure_ascii=False, indent=2)
@@ -1251,6 +1257,12 @@ def sync_subscription(engine):
             if runner:
                 runner.cfg = g
             changed += 1
+        # 钉住的节点在新订阅里不存在时自动解除，避免误选
+        if g.get("pinned_node") and g["pinned_node"] not in proxies:
+            g["pinned_node"] = ""
+            runner = engine.runners.get(g["id"])
+            if runner:
+                runner.cfg = g
 
     bucket = (engine.cfg.get("sub_routes") or {}).get(cur)
     if bucket is not None:
@@ -4219,6 +4231,7 @@ function groupCard(g){
     + '<svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>'
     + '<span class="gname">'+esc(g.label)+'</span> <span class="badge" data-role="role" style="display:none"></span>'
     + (g.invalid ? ' <span class="badge bad">绑定失效</span>' : '')
+    + (g.config.enabled === false ? ' <span class="badge">已暂停</span>' : '')
     + ' <span class="gsum" data-role="summary"></span></div>'
     + '<div class="row"><button data-act="run">立即检测</button>'
     + '<button data-act="toggle" class="ghost">暂停</button>'
