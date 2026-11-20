@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "3.0.5"
+VERSION = "3.0.6"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -1360,12 +1360,9 @@ def sync_subscription(engine):
             if runner:
                 runner.cfg = g
             changed += 1
-        # 钉住的节点在新订阅里不存在时自动解除，避免误选
-        if g.get("pinned_node") and g["pinned_node"] not in proxies:
-            g["pinned_node"] = ""
-            runner = engine.runners.get(g["id"])
-            if runner:
-                runner.cfg = g
+        # 钉住的节点只做有效性判断，不自动清除：
+        # 控制器短暂不可用或切订阅时都可能临时看不到该节点，清掉会丢用户意图
+
 
     bucket = (engine.cfg.get("sub_routes") or {}).get(cur)
     if bucket is not None:
@@ -2419,6 +2416,13 @@ def run_group(engine, g, dry_run=False, runner=None):
     cur_score = cur_verify or current_ms
 
     verify_on = bool(g.get("verify_url")) and int(g.get("verify_top", 0)) > 0
+
+    # 钉住的节点本身验证不通过时不要切过去，先守住当前可用节点
+    if verify_on and pin and best.get("name") == pin and not best.get("verify_ms"):
+        msg = "钉住节点 %s 未通过目标验证，保持当前 %s" % (pin, current or "-")
+        res.update(action="skip", message=msg)
+        log("[%s] %s" % (g["label"], msg))
+        return res
     if verify_on:
         # 验证模式下必须同类比较：当前节点没通过验证（None）就视为不可用
         keep = (
