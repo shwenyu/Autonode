@@ -69,6 +69,10 @@ Clash Verge / ClashX / Stash / Clash for Windows / mihomo —— 通过 `externa
 当前处于 3.0 alpha：统一运行快照、运行代次、配置 revision、操作记录、导航重构（概览/策略/资源/网络/观察）。
 详见 [docs/ROADMAP-3.0.md](docs/ROADMAP-3.0.md)。
 
+## 版本
+
+当前 **3.0.0**。完整变更见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 兼容性
 
 | 客户端 | 支持 |
