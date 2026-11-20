@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "3.0.0-alpha.12"
+VERSION = "3.0.0-alpha.13"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -603,6 +603,21 @@ def list_targets(ctx):
     except Exception:
         pass
     return groups + ["DIRECT", "REJECT"]
+
+
+QUIC_REJECT_DOMAINS = ["openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com"]
+
+
+def ai_compat_routes(target):
+    """ChatGPT 稳定所需的最小规则集：AI 域名走目标分组 + 拒绝其 QUIC(UDP/443)。"""
+    out = []
+    for dom in AI_DOMAINS:
+        out.append({"type": "DOMAIN-SUFFIX", "value": dom, "target": target})
+    for dom in QUIC_REJECT_DOMAINS:
+        out.append({"type": "AND",
+                    "value": "((DOMAIN-SUFFIX,%s),(NETWORK,udp),(DST-PORT,443))" % dom,
+                    "target": "REJECT"})
+    return out
 
 
 def write_rules(clash_dir, uid, routes):
@@ -2968,7 +2983,8 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
 
 <section id="sec-routes" hidden>
   <div class="card">
-    <h2>分流规则</h2>
+    <div class="row" style="justify-content:space-between"><h2 style="margin:0">分流规则</h2>
+      <button id="rt-aifix" class="ghost">ChatGPT 兼容</button></div>
     <table><thead><tr><th style="width:150px">匹配方式</th><th>值</th><th style="width:190px">走向</th><th style="width:52px"></th></tr></thead>
     <tbody id="rt"></tbody></table>
     <div class="row" style="margin-top:10px;gap:8px;flex-wrap:nowrap">
@@ -4507,6 +4523,16 @@ function renderRoutes(d){
   if(d && d.rules_uid === null) el('rt-msg').textContent = '提示：当前订阅没有「规则」模板，应用会失败。';
 }
 function saveRoutes(){ return post('/api/routes',{routes:ROUTES}).then(function(r){ ROUTES = r.routes||ROUTES; renderRoutes(); }); }
+if(el('rt-aifix')) el('rt-aifix').onclick = function(){
+  post('/api/routes/ai-fix', {}).then(function(r){
+    if(!r || !r.ok){ notify('失败：' + ((r && r.error) || '')); return; }
+    notify('已补充 ' + r.added + ' 条规则（AI 域名 → ' + r.target + '，QUIC 已拦截），点「应用」生效');
+    return get('/api/routes');
+  }).then(function(d){
+    if(d && d.routes){ ROUTES = d.routes; renderRoutes(); }
+  });
+};
+
 el('rt-add').onclick = function(){
   var v = (el('rt-value').value||'').trim(); if(!v) return;
   ROUTES.push({type:el('rt-type').value, value:v, target:el('rt-target').value});
@@ -5075,6 +5101,39 @@ class Handler(BaseHTTPRequestHandler):
                                str(payload.get("name") or ""),
                                str(payload.get("mode") or "install"))
             return self._send(200, json.dumps(res, ensure_ascii=False))
+        if path == "/api/routes/ai-fix":
+            ctx = controller_ctx(self.engine.cfg)
+            valid = set(list_targets(ctx))
+            target = str(payload.get("target") or "").strip()
+            if not target:
+                for g in self.engine.cfg.get("groups") or []:
+                    if g.get("role") == "ai" and g.get("group") in valid:
+                        target = g["group"]
+                        break
+                if not target:
+                    for g in self.engine.cfg.get("groups") or []:
+                        if g.get("enabled") and g.get("group") in valid:
+                            target = g["group"]
+                            break
+            if target not in valid:
+                return self._send(422, json.dumps({
+                    "ok": False, "error": "没有可用的目标分组"}, ensure_ascii=False))
+            routes = [dict(r) for r in (self.engine.cfg.get("routes") or [])]
+            have = {(r.get("type"), r.get("value")) for r in routes}
+            added = 0
+            for r in ai_compat_routes(target):
+                if (r["type"], r["value"]) not in have:
+                    routes.append(r)
+                    added += 1
+            self.engine.cfg["routes"] = routes
+            cur_uid = current_subscription().get("uid", "")
+            if cur_uid:
+                self.engine.cfg.setdefault("sub_routes", {})[cur_uid] = [dict(r) for r in routes]
+            save_config(self.engine.cfg)
+            record_op("routes", "ai-compat", {"target": target, "added": added})
+            return self._send(200, json.dumps({
+                "ok": True, "target": target, "added": added,
+                "total": len(routes)}, ensure_ascii=False))
         if path == "/api/subscriptions/poll":
             poll_subscriptions(self.engine, force=True)
             return self._send(200, json.dumps({"ok": True}, ensure_ascii=False))

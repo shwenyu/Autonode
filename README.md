@@ -81,6 +81,15 @@ Clash Verge / ClashX / Stash / Clash for Windows / mihomo —— 通过 `externa
 自动探测：配置目录候选覆盖 `~/.config/clash`、`~/.config/mihomo`、ClashX、Verge 各平台路径；控制器优先 unix socket，其次常见 TCP 端口。
 写模板、切订阅这类能力依赖 Clash Verge 的 `profiles.yaml` 结构，其他客户端会自动降级为只读或提示。
 
+## ChatGPT 兼容规则
+
+分流规则页右上角「ChatGPT 兼容」：一键补齐
+
+- AI 域名（20 个）→ 当前 AI 分组
+- OpenAI 系域名的 QUIC/UDP 443 → REJECT（避免客户端走 UDP 被网络丢弃导致反复重连）
+
+规则写入后需点「应用」生效。
+
 ## 订阅记忆
 
 每个订阅的「纳管分组绑定」会按订阅 uid 记住：
