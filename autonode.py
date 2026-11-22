@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "3.0.6"
+VERSION = "3.0.7"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -3677,8 +3677,8 @@ if(el('proc-add')) el('proc-add').onclick = function(){
   var name = (el('proc-name').value || '').trim();
   var target = el('proc-target').value || '';
   if(!name){ el('proc-msg').textContent = '先填进程名'; return; }
-  if(!target || target === 'DIRECT' || target === 'REJECT'){
-    el('proc-msg').textContent = '先选一个分组';
+  if(!target){
+    el('proc-msg').textContent = '先选择走向（分组 / DIRECT / REJECT）';
     return;
   }
   ROUTES.push({type: 'PROCESS-NAME', value: name, target: target});
