@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "3.0.7"
+VERSION = "3.0.8"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -628,6 +628,29 @@ def ai_compat_routes(target):
                     "value": "((DOMAIN-SUFFIX,%s),(NETWORK,udp),(DST-PORT,443))" % dom,
                     "target": "REJECT"})
     return out
+
+
+ROUTES_APPLIED_FILE = os.path.join(STATE_DIR, "routes_applied.json")
+
+
+def save_applied_routes(routes):
+    _ensure_state_dir()
+    try:
+        with open(ROUTES_APPLIED_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"ts": int(time.time()),
+                       "routes": [dict(r) for r in routes]}, fh,
+                      ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+def load_applied_routes():
+    try:
+        with open(ROUTES_APPLIED_FILE, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data.get("routes") if isinstance(data, dict) else None
+    except Exception:
+        return None
 
 
 def write_rules(clash_dir, uid, routes):
@@ -3157,6 +3180,7 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
       <input id="rt-value" placeholder="example.com" style="flex:1;min-width:140px">
       <select id="rt-target" style="width:150px"></select>
       <button id="rt-add">添加</button>
+      <span id="rt-dirty" class="badge warn" hidden>未应用</span>
       <button class="primary" id="rt-apply">应用</button>
     </div>
     <div class="muted" id="rt-msg" style="margin-top:8px"></div>
@@ -4720,6 +4744,7 @@ function renderRoutes(d){
       + '<td><button data-rtdel="'+i+'">删</button></td></tr>';
   }).join('') || '<tr><td colspan="4" class="muted">还没有规则</td></tr>';
   if(d && d.rules_uid === null) el('rt-msg').textContent = '提示：当前订阅没有「规则」模板，应用会失败。';
+  if(el('rt-dirty')) el('rt-dirty').hidden = !(d && d.dirty);
 }
 function saveRoutes(){ return post('/api/routes',{routes:ROUTES}).then(function(r){ ROUTES = r.routes||ROUTES; renderRoutes(); }); }
 if(el('rt-aifix')) el('rt-aifix').onclick = function(){
@@ -5232,6 +5257,8 @@ class Handler(BaseHTTPRequestHandler):
                 "targets": list_targets(ctx),
                 "rules_uid": uid,
                 "active_profile": cur,
+                "dirty": (load_applied_routes() !=
+                          [dict(r) for r in (eng.cfg.get("routes") or [])]),
                 "clash_dir": eng.cfg.get("clash_dir", ""),
             }, ensure_ascii=False))
         return self._send(404, json.dumps({"error": "not found"}))
@@ -5460,6 +5487,7 @@ class Handler(BaseHTTPRequestHandler):
                                                   ensure_ascii=False))
             threading.Thread(target=restart_verge, daemon=True).start()
             self.engine.bump_epoch("rules-apply")
+            save_applied_routes(self.engine.cfg.get("routes") or [])
             record_op("rules", "applied", {"file": os.path.basename(written)})
             return self._send(200, json.dumps({"ok": True, "file": written},
                                               ensure_ascii=False))
