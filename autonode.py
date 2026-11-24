@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "3.0.8"
+VERSION = "3.0.9"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -2545,6 +2545,17 @@ def site_check(engine, gid, url, top=12):
     ctx = controller_ctx(engine.cfg)
     g = runner.cfg
     engine.site = {"running": True, "url": url, "gid": gid, "results": [], "error": None}
+    try:
+        _p = resolve_path(engine, url)
+        _m = _p.get("matched") or {}
+        engine.site["route"] = {
+            "outbound": _p.get("outbound"),
+            "chain": _p.get("chain") or [],
+            "rule": {"index": _m.get("index"), "type": _m.get("type"),
+                     "payload": _m.get("payload")},
+        }
+    except Exception:
+        engine.site["route"] = None
 
     try:
         data = api(ctx, "GET", "/proxies/%s" % urllib.parse.quote(g["group"], safe=""), timeout=10)
@@ -3222,6 +3233,7 @@ pre{background:#f7f8fa;border-radius:10px;padding:14px;max-height:60vh;overflow:
       <button id="site-run">测试</button>
     </div>
     <div class="muted" id="site-msg" style="margin-top:8px">未运行</div>
+    <div class="muted" id="site-route" style="margin-top:4px;font-size:11.5px"></div>
     <div id="site-res" style="margin-top:10px"></div>
   </div>
 </section>
@@ -4832,6 +4844,18 @@ function pollSite(){
     el('site-res').innerHTML = rows?('<table><thead><tr><th>节点</th><th>结果</th><th style="width:62px"></th></tr></thead><tbody>'+rows+'</tbody></table>'):'';
     el('site-msg').textContent = s.running ? ('测试中 '+(s.progress||'')+' …')
       : (s.error?('出错：'+s.error):('完成，共 '+((s.results||[]).length)+' 个节点'));
+    var rt = s.route;
+    if(el('site-route')){
+      if(rt && rt.outbound){
+        var ruleTxt = (rt.rule && rt.rule.type)
+          ? ('规则 #' + rt.rule.index + ' ' + rt.rule.type + ' ' + (rt.rule.payload || ''))
+          : '无匹配规则';
+        el('site-route').textContent = '你的实际走向：' + ruleTxt + ' → '
+          + ((rt.chain && rt.chain.length) ? rt.chain.join(' → ') : rt.outbound);
+      } else {
+        el('site-route').textContent = '';
+      }
+    }
     if(s.running) setTimeout(pollSite, 1500);
   });
 }
