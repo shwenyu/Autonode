@@ -5308,6 +5308,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/presets/ai":
             return self._send(200, json.dumps({"ok": True, "domains": AI_DOMAINS},
                                               ensure_ascii=False))
+        if path == "/api/routes/history":
+            hist = load_routes_history(10)
+            return self._send(200, json.dumps({
+                "ok": True,
+                "history": [{"ts": h.get("ts"), "count": len(h.get("routes") or [])}
+                            for h in hist]}, ensure_ascii=False))
         if path == "/api/routes":
             ctx = controller_ctx(eng.cfg)
             cur, uid = active_rules_uid(eng.cfg.get("clash_dir", ""))
@@ -5534,12 +5540,6 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/groups/rescan":
             added = rescan_groups(self.engine)
             return self._send(200, json.dumps({"ok": True, "added": added}, ensure_ascii=False))
-        if path == "/api/routes/history":
-            hist = load_routes_history(10)
-            return self._send(200, json.dumps({
-                "ok": True,
-                "history": [{"ts": h.get("ts"), "count": len(h.get("routes") or [])}
-                            for h in hist]}, ensure_ascii=False))
         if path == "/api/routes/restore":
             idx = int(payload.get("index", 0) or 0)
             hist = load_routes_history(20)
