@@ -40,7 +40,7 @@ import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "3.0.9"
+VERSION = "3.0.10"
 
 BASE_DIR = os.path.expanduser("~/.config/autonode")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
@@ -631,6 +631,41 @@ def ai_compat_routes(target):
 
 
 ROUTES_APPLIED_FILE = os.path.join(STATE_DIR, "routes_applied.json")
+ROUTES_HISTORY_FILE = os.path.join(STATE_DIR, "routes_history.jsonl")
+
+
+def push_routes_history(routes):
+    """每次覆盖规则前留一份快照，便于回滚。"""
+    if not routes:
+        return
+    _ensure_state_dir()
+    try:
+        entry = {"ts": int(time.time()), "routes": [dict(r) for r in routes]}
+        with open(ROUTES_HISTORY_FILE, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        # 只保留最近 20 份
+        if os.path.getsize(ROUTES_HISTORY_FILE) > 512 * 1024:
+            with open(ROUTES_HISTORY_FILE, "r", encoding="utf-8") as fh:
+                lines = fh.readlines()[-20:]
+            with open(ROUTES_HISTORY_FILE, "w", encoding="utf-8") as fh:
+                fh.writelines(lines)
+    except OSError:
+        pass
+
+
+def load_routes_history(limit=10):
+    try:
+        with open(ROUTES_HISTORY_FILE, "r", encoding="utf-8") as fh:
+            lines = fh.readlines()[-limit:]
+        out = []
+        for line in lines:
+            try:
+                out.append(json.loads(line))
+            except Exception:
+                continue
+        return out
+    except Exception:
+        return []
 
 
 def save_applied_routes(routes):
@@ -5320,6 +5355,7 @@ class Handler(BaseHTTPRequestHandler):
                     typ = str(r.get("type") or "DOMAIN-SUFFIX").strip().upper()
                     if val and tgt:
                         clean.append({"type": typ, "value": val, "target": tgt})
+                push_routes_history(self.engine.cfg.get("routes") or [])
                 self.engine.cfg["routes"] = clean
                 cur_uid = current_subscription().get("uid", "")
                 if cur_uid:
@@ -5498,6 +5534,34 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/groups/rescan":
             added = rescan_groups(self.engine)
             return self._send(200, json.dumps({"ok": True, "added": added}, ensure_ascii=False))
+        if path == "/api/routes/history":
+            hist = load_routes_history(10)
+            return self._send(200, json.dumps({
+                "ok": True,
+                "history": [{"ts": h.get("ts"), "count": len(h.get("routes") or [])}
+                            for h in hist]}, ensure_ascii=False))
+        if path == "/api/routes/restore":
+            idx = int(payload.get("index", 0) or 0)
+            hist = load_routes_history(20)
+            if not hist:
+                return self._send(404, json.dumps({"ok": False, "error": "没有历史快照"},
+                                                  ensure_ascii=False))
+            entry = hist[-1 - idx] if 0 <= idx < len(hist) else None
+            if not entry:
+                return self._send(404, json.dumps({"ok": False, "error": "索引超出范围"},
+                                                  ensure_ascii=False))
+            push_routes_history(self.engine.cfg.get("routes") or [])
+            self.engine.cfg["routes"] = [dict(r) for r in (entry.get("routes") or [])]
+            cur_uid = current_subscription().get("uid", "")
+            if cur_uid:
+                self.engine.cfg.setdefault("sub_routes", {})[cur_uid] = [
+                    dict(r) for r in self.engine.cfg["routes"]]
+            save_config(self.engine.cfg)
+            record_op("routes", "restored-history", {"index": idx,
+                                                     "count": len(self.engine.cfg["routes"])})
+            return self._send(200, json.dumps({
+                "ok": True, "count": len(self.engine.cfg["routes"]),
+                "routes": self.engine.cfg["routes"]}, ensure_ascii=False))
         if path == "/api/routes/apply":
             cur, uid = active_rules_uid(self.engine.cfg.get("clash_dir", ""))
             if not uid:
